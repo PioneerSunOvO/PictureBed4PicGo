@@ -3,6 +3,10 @@
   'use strict';
 
   const TOKEN_KEY = 'pb4pg_pat';
+  const AUTH_USER_KEY = 'pb4pg_user';
+  const OAUTH_STATE_KEY = 'pb4pg_oauth_state';
+  const OAUTH_VERIFIER_KEY = 'pb4pg_code_verifier';
+  const OAUTH_SECRET_KEY = 'pb4pg_oauth_secret';
   const HASH_RE = /([a-f0-9]{32})(?:-\d+)?\.[^.]+$/i;
 
   let ITEMS = [];
@@ -11,14 +15,318 @@
   const selected = new Set();
   let focused = null;
   let dupOnly = false;
+  let devicePollAbort = null;
   const hashGroups = new Map();
 
   function apiBase() {
     return 'https://api.github.com/repos/' + REPO.owner + '/' + REPO.repo;
   }
 
+  function oauthCfg() {
+    return global.OAUTH || {};
+  }
+
+  function oauthClientId() {
+    const cfgId = String(oauthCfg().clientId || '').trim();
+    if (cfgId && !/PLACEHOLDER/i.test(cfgId)) return cfgId;
+    return sessionStorage.getItem('pb4pg_oauth_client_id') || '';
+  }
+
+  function oauthClientSecret() {
+    return sessionStorage.getItem(OAUTH_SECRET_KEY) || '';
+  }
+
+  function appManifest() {
+    const redirect = oauthRedirectUri() || 'https://pioneersunovo.github.io/PictureBed4PicGo/gallery.html';
+    return {
+      name: 'PictureBed4PicGo Gallery',
+      url: redirect,
+      redirect_url: redirect,
+      callback_urls: [redirect],
+      public: true,
+      request_oauth_on_install: false,
+      default_permissions: { contents: 'write', metadata: 'read' },
+      default_events: []
+    };
+  }
+
+  function registerGithubApp() {
+    const redirect = oauthRedirectUri();
+    if (!redirect) {
+      setStatus('请通过 GitHub Pages 打开本页', 'err');
+      return;
+    }
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = 'https://github.com/settings/apps/new';
+    form.style.display = 'none';
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'manifest';
+    input.value = JSON.stringify(appManifest());
+    form.appendChild(input);
+    document.body.appendChild(form);
+    form.submit();
+  }
+
+  async function handleManifestReturn() {
+    const params = new URLSearchParams(location.search);
+    const code = params.get('code');
+    if (!code || params.get('setup_action') === 'install') return false;
+
+    setStatus('正在注册 GitHub App…');
+    const res = await fetch('https://api.github.com/app-manifests/' + encodeURIComponent(code) + '/conversions', {
+      method: 'POST',
+      headers: { Accept: 'application/vnd.github+json' }
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || 'GitHub App 注册失败');
+    }
+    if (data.client_id) {
+      sessionStorage.setItem('pb4pg_oauth_client_id', data.client_id);
+    }
+    if (data.client_secret) {
+      sessionStorage.setItem(OAUTH_SECRET_KEY, data.client_secret);
+    }
+    history.replaceState(null, '', location.pathname + location.hash);
+    setStatus('GitHub App 已就绪，正在登录…', 'ok');
+    return data;
+  }
+
+  function oauthRedirectUri() {
+    const cfg = oauthCfg();
+    if (cfg.redirectUri) return cfg.redirectUri;
+    if (location.protocol === 'file:') return '';
+    return location.origin + location.pathname;
+  }
+
   function token() {
     return sessionStorage.getItem(TOKEN_KEY) || '';
+  }
+
+  function randomString(len) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+    const arr = new Uint8Array(len);
+    crypto.getRandomValues(arr);
+    let s = '';
+    for (let i = 0; i < len; i++) s += chars[arr[i] % chars.length];
+    return s;
+  }
+
+  async function sha256Base64Url(str) {
+    const data = new TextEncoder().encode(str);
+    const hash = await crypto.subtle.digest('SHA-256', data);
+    const bytes = new Uint8Array(hash);
+    let bin = '';
+    bytes.forEach(b => { bin += String.fromCharCode(b); });
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+  }
+
+  async function oauthTokenExchange(body) {
+    const res = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+      body
+    });
+    return res.json();
+  }
+
+  async function saveToken(accessToken) {
+    sessionStorage.setItem(TOKEN_KEY, accessToken);
+    try {
+      const res = await fetch('https://api.github.com/user', {
+        headers: { Authorization: 'Bearer ' + accessToken, Accept: 'application/vnd.github+json' }
+      });
+      if (res.ok) {
+        const u = await res.json();
+        sessionStorage.setItem(AUTH_USER_KEY, u.login || '');
+      } else {
+        sessionStorage.removeItem(AUTH_USER_KEY);
+      }
+    } catch (_) {
+      sessionStorage.removeItem(AUTH_USER_KEY);
+    }
+    showAuthUI();
+    filter();
+  }
+
+  async function handleOAuthReturn() {
+    const params = new URLSearchParams(location.search);
+    const code = params.get('code');
+    if (!code || !oauthClientId()) return false;
+
+    const state = params.get('state');
+    const saved = sessionStorage.getItem(OAUTH_STATE_KEY);
+    const verifier = sessionStorage.getItem(OAUTH_VERIFIER_KEY);
+    sessionStorage.removeItem(OAUTH_STATE_KEY);
+    sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
+    history.replaceState(null, '', location.pathname + location.hash);
+
+    if (!state || state !== saved) throw new Error('OAuth 校验失败，请重试');
+
+    setStatus('正在完成 GitHub 登录…');
+    const body = new URLSearchParams({
+      client_id: oauthClientId(),
+      code,
+      redirect_uri: oauthRedirectUri()
+    });
+    if (verifier) body.set('code_verifier', verifier);
+    const secret = oauthClientSecret();
+    if (secret) body.set('client_secret', secret);
+
+    const data = await oauthTokenExchange(body);
+    if (data.error) {
+      if (oauthClientSecret()) throw new Error(data.error_description || data.error);
+      setStatus('正在尝试设备码登录…');
+      await startDeviceLogin();
+      return true;
+    }
+    await saveToken(data.access_token);
+    setStatus('GitHub 登录成功', 'ok');
+    return true;
+  }
+
+  async function startOAuthRedirect() {
+    const clientId = oauthClientId();
+    const redirectUri = oauthRedirectUri();
+    if (!clientId) {
+      setStatus('OAuth 未配置 Client ID', 'err');
+      return;
+    }
+    if (!redirectUri) {
+      setStatus('请通过 GitHub Pages 打开本页以使用 GitHub 登录', 'err');
+      return;
+    }
+
+    const state = randomString(24);
+    sessionStorage.setItem(OAUTH_STATE_KEY, state);
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      state
+    });
+    if (!oauthClientSecret()) {
+      params.set('scope', oauthCfg().scope || 'repo');
+    }
+
+    if (!oauthClientSecret()) {
+      const verifier = randomString(96);
+      const challenge = await sha256Base64Url(verifier);
+      sessionStorage.setItem(OAUTH_VERIFIER_KEY, verifier);
+      params.set('code_challenge', challenge);
+      params.set('code_challenge_method', 'S256');
+    }
+
+    location.assign('https://github.com/login/oauth/authorize?' + params.toString());
+  }
+
+  async function pollDeviceToken(deviceCode, intervalSec) {
+    if (devicePollAbort) devicePollAbort.aborted = true;
+    const abort = { aborted: false };
+    devicePollAbort = abort;
+
+    let wait = Math.max(5, intervalSec || 5);
+    const deadline = Date.now() + 900000;
+
+    while (!abort.aborted && Date.now() < deadline) {
+      await sleep(wait * 1000);
+      const body = new URLSearchParams({
+        client_id: oauthClientId(),
+        device_code: deviceCode,
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code'
+      });
+      const data = await oauthTokenExchange(body);
+      if (data.error === 'authorization_pending') continue;
+      if (data.error === 'slow_down') {
+        wait += 5;
+        continue;
+      }
+      if (data.error) {
+        throw new Error(data.error_description || data.error);
+      }
+      if (data.access_token) {
+        devicePollAbort = null;
+        return data.access_token;
+      }
+    }
+    devicePollAbort = null;
+    throw new Error('授权超时，请重试');
+  }
+
+  async function startDeviceLogin() {
+    const clientId = oauthClientId();
+    if (!clientId) {
+      setStatus('OAuth 未配置 Client ID', 'err');
+      return;
+    }
+    if (oauthClientSecret()) {
+      setStatus('请使用 GitHub 登录按钮（浏览器授权）', 'err');
+      return;
+    }
+
+    setStatus('正在连接 GitHub…');
+    const res = await fetch('https://github.com/login/device/code', {
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+      body: new URLSearchParams({
+        client_id: clientId,
+        scope: oauthCfg().scope || 'repo'
+      })
+    });
+    const data = await res.json();
+    if (data.error || data.message) {
+      throw new Error(data.error_description || data.message || data.error || '设备码请求失败');
+    }
+
+    const verifyUrl = data.verification_uri +
+      '?user_code=' + encodeURIComponent(data.user_code);
+    window.open(verifyUrl, 'pb4pg_github_auth', 'noopener,width=520,height=720');
+    setStatus('已在 GitHub 打开授权页（已登录则直接点 Authorize）…');
+
+    const accessToken = await pollDeviceToken(data.device_code, data.interval);
+    await saveToken(accessToken);
+    setStatus('GitHub 登录成功', 'ok');
+  }
+
+  async function loginGithub() {
+    try {
+      const redirect = oauthRedirectUri();
+      if (!redirect) {
+        setStatus('请通过 GitHub Pages 打开本页以登录', 'err');
+        return;
+      }
+      if (!oauthClientId()) {
+        setStatus('首次使用：正在跳转 GitHub 注册应用…');
+        registerGithubApp();
+        return;
+      }
+      if (oauthRedirectUri()) {
+        await startOAuthRedirect();
+      } else {
+        await startDeviceLogin();
+      }
+    } catch (e) {
+      setStatus('登录失败: ' + e.message, 'err');
+    }
+  }
+
+  function logout() {
+    if (devicePollAbort) devicePollAbort.aborted = true;
+    sessionStorage.removeItem(TOKEN_KEY);
+    sessionStorage.removeItem(AUTH_USER_KEY);
+    sessionStorage.removeItem(OAUTH_STATE_KEY);
+    sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
+    selected.clear();
+    const pat = document.getElementById('pat');
+    if (pat) pat.value = '';
+    showAuthUI();
+    filter();
+    setStatus('已退出', 'ok');
   }
 
   function setStatus(msg, kind) {
@@ -233,7 +541,7 @@
           ? '<button type="button" data-rename="' + escapeAttr(item.newRel) + '">重命名</button>' +
             '<button type="button" data-replace="' + escapeAttr(item.newRel) + '">替换</button>' +
             '<button type="button" class="del" data-delete="' + escapeAttr(item.newRel) + '">删除</button>'
-          : '<button type="button" class="del" disabled title="先保存 PAT">删除</button>') +
+          : '<button type="button" class="del" disabled title="请先 GitHub 登录">删除</button>') +
         '</div></div>';
 
       card.querySelector('.thumb-wrap').onclick = () => {
@@ -339,7 +647,7 @@
   }
 
   async function deleteOne(rel) {
-    if (!token()) throw new Error('请先保存 PAT');
+    if (!token()) throw new Error('请先 GitHub 登录');
     if (!confirm('确认删除？\n' + rel + '\n此操作不可恢复。')) return false;
     setStatus('删除中…');
     const meta = await getFileMeta(rel);
@@ -380,15 +688,32 @@
     );
   }
 
-  function showManageBar() {
-    const bar = document.getElementById('manageBar');
+  function showAuthUI() {
+    const loggedIn = !!token();
+    const user = sessionStorage.getItem(AUTH_USER_KEY);
+    const manageBar = document.getElementById('manageBar');
+    const loginRow = document.getElementById('loginRow');
+    const loggedRow = document.getElementById('loggedRow');
+    const patRow = document.getElementById('patRow');
     const st = document.getElementById('patStatus');
-    if (token()) {
-      if (bar) bar.classList.remove('hidden');
-      if (st) st.textContent = 'Token 已保存（仅本标签页）';
-    } else {
-      if (bar) bar.classList.add('hidden');
+    const userLabel = document.getElementById('authUser');
+
+    if (loggedIn) {
+      if (manageBar) manageBar.classList.remove('hidden');
+      if (loginRow) loginRow.classList.add('hidden');
+      if (loggedRow) loggedRow.classList.remove('hidden');
+      if (userLabel) userLabel.textContent = user ? '@' + user : '已授权';
       if (st) st.textContent = '';
+    } else {
+      if (manageBar) manageBar.classList.add('hidden');
+      if (loginRow) loginRow.classList.remove('hidden');
+      if (loggedRow) loggedRow.classList.add('hidden');
+      if (st) st.textContent = oauthClientId()
+        ? '已登录 GitHub 浏览器时，点登录后一键授权即可'
+        : '首次登录将自动注册 Gallery 应用（仅需一次）';
+    }
+    if (patRow) {
+      if (loggedIn) patRow.classList.add('hidden');
     }
   }
 
@@ -479,23 +804,24 @@
       if (e.target.id === 'modal') document.getElementById('modal').classList.remove('open');
     };
 
+    const loginBtn = document.getElementById('githubLogin');
+    if (loginBtn) loginBtn.onclick = () => loginGithub();
+
+    const logoutBtn = document.getElementById('githubLogout');
+    if (logoutBtn) logoutBtn.onclick = () => logout();
+
     document.getElementById('savePat').onclick = () => {
       const v = (document.getElementById('pat').value || '').trim();
       if (!v) return alert('请输入 PAT');
-      sessionStorage.setItem(TOKEN_KEY, v);
-      document.getElementById('pat').value = '';
-      showManageBar();
-      filter();
+      saveToken(v).then(() => setStatus('PAT 已保存（仅本标签页）', 'ok'));
     };
 
-    document.getElementById('clearPat').onclick = () => {
-      sessionStorage.removeItem(TOKEN_KEY);
-      document.getElementById('pat').value = '';
-      showManageBar();
-      filter();
-    };
+    document.getElementById('clearPat').onclick = () => logout();
 
     document.getElementById('refreshList').onclick = () => refreshFromGitHub(false);
+
+    const refreshLogged = document.getElementById('refreshListLogged');
+    if (refreshLogged) refreshLogged.onclick = () => refreshFromGitHub(false);
 
     document.getElementById('selectAll').onchange = e => {
       const on = e.target.checked;
@@ -526,9 +852,31 @@
       input.dataset.target = [...selected][0];
       input.click();
     };
+
+    const patToggle = document.getElementById('patToggle');
+    if (patToggle) {
+      patToggle.onclick = () => {
+        const row = document.getElementById('patRow');
+        if (row) row.classList.toggle('hidden');
+      };
+    }
   }
 
-  function init(opts) {
+  async function handleCallbackOnInit() {
+    const params = new URLSearchParams(location.search);
+    const code = params.get('code');
+    if (!code) return;
+
+    if (params.get('state')) {
+      await handleOAuthReturn();
+      return;
+    }
+
+    const manifest = await handleManifestReturn();
+    if (manifest) await startOAuthRedirect();
+  }
+
+  async function init(opts) {
     ITEMS = (opts.items || []).map(i => {
       if (i.hash !== undefined) return i;
       return buildItem(i.name, i.oldRel);
@@ -536,7 +884,18 @@
     OLD_MAP = opts.oldMap || {};
     rebuildDupIndex();
     bindEvents();
-    showManageBar();
+    showAuthUI();
+
+    try {
+      await handleCallbackOnInit();
+    } catch (e) {
+      setStatus('GitHub 登录失败: ' + e.message, 'err');
+    }
+
+    if (token() && !sessionStorage.getItem(AUTH_USER_KEY)) {
+      try { await saveToken(token()); } catch (_) { /* ignore */ }
+    }
+
     filter();
     if (location.protocol !== 'file:') {
       refreshFromGitHub(true);

@@ -9,20 +9,20 @@
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #faf6f0;
-      --bg-elev: #fffaf4;
-      --bg-card: #ffffff;
-      --bg-thumb: #f3ece3;
-      --line: rgba(120, 90, 60, 0.11);
+      --bg: #e8e2d8;
+      --bg-elev: #f0ebe3;
+      --bg-card: #f5f1ea;
+      --bg-thumb: #e4ddd4;
+      --line: rgba(100, 80, 55, 0.12);
       --text: #4a4035;
-      --muted: #8c7f6f;
-      --accent: #c49a5c;
-      --accent-dim: rgba(196, 154, 92, 0.16);
-      --warn: #d4a04a;
-      --warn-dim: rgba(212, 160, 74, 0.14);
-      --danger: #d4726a;
-      --danger-dim: rgba(212, 114, 106, 0.12);
-      --shadow: 0 4px 24px rgba(120, 90, 60, 0.07);
+      --muted: #7a7064;
+      --accent: #b8925a;
+      --accent-dim: rgba(184, 146, 90, 0.18);
+      --warn: #c49a48;
+      --warn-dim: rgba(196, 154, 72, 0.14);
+      --danger: #c4685c;
+      --danger-dim: rgba(196, 104, 92, 0.12);
+      --shadow: 0 4px 20px rgba(80, 60, 40, 0.06);
       --radius: 14px;
       --mono: "JetBrains Mono", ui-monospace, monospace;
       --sans: "DM Sans", system-ui, sans-serif;
@@ -33,8 +33,8 @@
       font-family: var(--sans);
       color: var(--text);
       background:
-        radial-gradient(120% 90% at 50% -30%, rgba(255, 218, 175, 0.45), transparent 55%),
-        radial-gradient(80% 60% at 100% 100%, rgba(255, 235, 210, 0.5), transparent 50%),
+        radial-gradient(120% 90% at 50% -30%, rgba(210, 185, 150, 0.22), transparent 55%),
+        radial-gradient(80% 60% at 100% 100%, rgba(200, 175, 145, 0.15), transparent 50%),
         var(--bg);
       background-attachment: fixed;
     }
@@ -51,9 +51,9 @@
       font-weight: 600;
       color: #3d342a;
     }
-    .hero p { margin: 0; color: var(--muted); font-size: 0.92rem; max-width: 46ch; line-height: 1.55; }
-    .hero a { color: #a67c42; text-decoration: none; }
-    .hero a:hover { color: #c49a5c; }
+    .hero p { margin: 0; color: var(--muted); font-size: 0.92rem; max-width: 52ch; line-height: 1.55; }
+    .hero a { color: #96704a; text-decoration: none; }
+    .hero a:hover { color: #b8925a; }
 
     .glass {
       background: var(--bg-elev);
@@ -80,7 +80,7 @@
       font-size: 0.88rem;
       border-radius: 10px;
       border: 1px solid var(--line);
-      background: #fffdfb;
+      background: #f3eee6;
       color: var(--text);
       padding: 8px 12px;
       outline: none;
@@ -89,23 +89,23 @@
     input:focus, select:focus {
       border-color: rgba(196, 154, 92, 0.45);
       box-shadow: 0 0 0 3px var(--accent-dim);
-      background: #ffffff;
+      background: #f8f4ec;
     }
     input[type=password], input[type=search] { min-width: 220px; flex: 1; }
     input[type=password] { font-family: var(--mono); font-size: 0.8rem; }
     select { cursor: pointer; }
-    button { cursor: pointer; white-space: nowrap; background: #fffdfb; }
-    button:hover { background: #f5ede4; border-color: rgba(120, 90, 60, 0.18); }
+    button { cursor: pointer; white-space: nowrap; background: #f3eee6; }
+    button:hover { background: #e8e0d6; border-color: rgba(100, 80, 55, 0.2); }
     button:active { opacity: 0.88; }
     button:disabled { opacity: 0.4; cursor: not-allowed; }
     button.primary {
-      background: #d4a96a;
-      border-color: #c49a5c;
-      color: #fffaf5; font-weight: 500;
+      background: #b8925a;
+      border-color: #a6804a;
+      color: #faf6f0; font-weight: 500;
     }
     button.primary:hover {
-      background: #c49a5c;
-      border-color: #b0884a;
+      background: #a6804a;
+      border-color: #96704a;
     }
     button.danger {
       background: #fdf0ee; border-color: rgba(212, 114, 106, 0.3); color: #c45a52;
@@ -208,10 +208,10 @@
     .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
     .actions button, .actions a {
       font-size: 0.72rem; padding: 6px 9px; border-radius: 8px;
-      border: 1px solid var(--line); background: #fffdfb;
+      border: 1px solid var(--line); background: #f3eee6;
       color: var(--text); text-decoration: none; cursor: pointer;
     }
-    .actions button:hover, .actions a:hover { background: #f5ede4; }
+    .actions button:hover, .actions a:hover { background: #e8e0d6; }
     .actions .del {
       background: #fdf0ee; border-color: rgba(212, 114, 106, 0.3); color: #c45a52;
     }
@@ -241,7 +241,15 @@
 
     #replaceInput { display: none; }
     .hidden { display: none !important; }
-    #patStatus { font-size: 0.8rem; color: var(--muted); }
+    .auth-user {
+      font-size: 0.88rem; color: var(--muted);
+      padding: 6px 10px; background: rgba(100, 80, 55, 0.06); border-radius: 8px;
+    }
+    .pat-toggle {
+      font-size: 0.8rem; color: var(--muted); background: transparent;
+      border: none; padding: 4px 8px; cursor: pointer;
+    }
+    .pat-toggle:hover { color: var(--text); background: rgba(100, 80, 55, 0.06); }
 
     @keyframes rise {
       from { opacity: 0; transform: translateY(10px); }
@@ -263,18 +271,27 @@
     <header class="hero">
       <div>
         <h1>PictureBed4PicGo</h1>
-        <p>打开自动同步 GitHub · 重复按文件名 hash 标记 · 管理需 PAT（仅存本页 session）· <a href="https://pioneersunovo.github.io/PictureBed4PicGo/gallery.html" target="_blank" rel="noopener">Pages</a></p>
+        <p>打开自动同步 · 重复 hash 标记 · <strong>GitHub 登录</strong>即可管理（无需手动 PAT）· <a href="https://pioneersunovo.github.io/PictureBed4PicGo/gallery.html" target="_blank" rel="noopener">Pages</a></p>
       </div>
     </header>
 
     <section class="glass panel" id="authPanel">
       <div class="panel-title"><span class="dot"></span> GitHub 管理</div>
-      <div class="row">
-        <input type="password" id="pat" placeholder="GitHub PAT（repo 权限）" autocomplete="off">
-        <button type="button" id="savePat" class="primary">保存 Token</button>
-        <button type="button" id="clearPat" class="ghost">清除</button>
+      <div class="row" id="loginRow">
+        <button type="button" id="githubLogin" class="primary">GitHub 登录</button>
         <button type="button" id="refreshList">手动同步</button>
         <span id="patStatus"></span>
+        <button type="button" id="patToggle" class="pat-toggle">手动 PAT ▾</button>
+      </div>
+      <div class="row hidden" id="loggedRow">
+        <span class="auth-user" id="authUser"></span>
+        <button type="button" id="githubLogout" class="ghost">退出</button>
+        <button type="button" id="refreshListLogged">手动同步</button>
+      </div>
+      <div class="row hidden" id="patRow">
+        <input type="password" id="pat" placeholder="或粘贴 PAT（repo 权限）" autocomplete="off">
+        <button type="button" id="savePat">保存 PAT</button>
+        <button type="button" id="clearPat" class="ghost">清除</button>
       </div>
       <div class="row hidden" id="manageBar">
         <label class="chip"><input type="checkbox" id="selectAll"> 全选当前</label>
@@ -309,6 +326,11 @@
 
   <script>
     const REPO = { owner: 'PioneerSunOvO', repo: 'PictureBed4PicGo', branch: 'master' };
+    const OAUTH = {
+      clientId: '',
+      redirectUri: 'https://pioneersunovo.github.io/PictureBed4PicGo/gallery.html',
+      scope: 'repo'
+    };
   </script>
   <script src="gallery-app.js"></script>
   <script>
