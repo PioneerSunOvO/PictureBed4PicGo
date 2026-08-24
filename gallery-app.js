@@ -42,6 +42,8 @@
   let autoSmartSelected = false;
   let similarThreshold = 8;
   const PHASH_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']);
+  /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
+  let repoHeadCommit = null;
 
   function extOf(name) {
     const i = name.lastIndexOf('.');
@@ -584,6 +586,7 @@
     const hash = extractHash(name);
     const kind = fileKind(name);
     const date = extractDate(name);
+    const pin = repoHeadCommit || REPO.branch;
     return {
       name,
       newRel: rel,
@@ -594,9 +597,26 @@
       date,
       dateStr: formatDate(date),
       dupCount: 0,
-      cdn: 'https://cdn.jsdelivr.net/gh/' + REPO.owner + '/' + REPO.repo + '@' + REPO.branch + '/' + enc,
-      raw: 'https://raw.githubusercontent.com/' + REPO.owner + '/' + REPO.repo + '/' + REPO.branch + '/' + enc
+      rev: 0,
+      cdn: 'https://cdn.jsdelivr.net/gh/' + REPO.owner + '/' + REPO.repo + '@' + pin + '/' + enc,
+      raw: 'https://raw.githubusercontent.com/' + REPO.owner + '/' + REPO.repo + '/' + pin + '/' + enc
     };
+  }
+
+  async function fetchRepoHead() {
+    try {
+      const ref = await ghFetch('/git/ref/heads/' + REPO.branch);
+      if (ref && ref.object && ref.object.sha) repoHeadCommit = ref.object.sha;
+    } catch (_) { /* keep previous pin */ }
+    return repoHeadCommit;
+  }
+
+  function bumpRepoHead(commitSha) {
+    if (commitSha) repoHeadCommit = commitSha;
+  }
+
+  function mediaPin(item) {
+    return (item && item.commitSha) || repoHeadCommit || REPO.branch;
   }
 
   async function ghFetch(path, opts = {}) {
@@ -715,11 +735,18 @@
 
   function srcOf(item) {
     const source = document.getElementById('source');
+    const enc = encodePath(item.newRel);
+    const pin = mediaPin(item);
     let url;
-    if (source.value === 'raw') url = item.raw;
-    else if (source.value === 'local') url = 'images/' + item.name;
-    else url = item.cdn;
-    if (item.rev) url += (url.includes('?') ? '&' : '?') + 'v=' + item.rev;
+    if (source.value === 'raw') {
+      url = 'https://raw.githubusercontent.com/' + REPO.owner + '/' + REPO.repo + '/' + pin + '/' + enc;
+    } else if (source.value === 'local') {
+      url = 'images/' + item.name;
+    } else {
+      url = 'https://cdn.jsdelivr.net/gh/' + REPO.owner + '/' + REPO.repo + '@' + pin + '/' + enc;
+    }
+    const bust = item.rev || (item.blobSha ? item.blobSha.slice(0, 8) : '');
+    if (bust) url += (url.includes('?') ? '&' : '?') + 'v=' + bust;
     return url;
   }
 
@@ -1012,6 +1039,13 @@
     return ITEMS.find(i => i.newRel === rel);
   }
 
+  function formatBytes(n) {
+    if (!n) return '';
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1048576).toFixed(2) + ' MB';
+  }
+
   function openDetail(item) {
     detailItem = item;
     document.getElementById('appShell').classList.add('detail-open');
@@ -1021,7 +1055,11 @@
     const actions = document.getElementById('detailActions');
 
     if (item.kind === 'image') {
-      preview.innerHTML = '<img alt="" src="' + escapeAttr(url) + '">';
+      const img = document.createElement('img');
+      img.alt = item.name;
+      img.src = url;
+      preview.innerHTML = '';
+      preview.appendChild(img);
     } else if (item.kind === 'video') {
       preview.innerHTML = '<video controls src="' + escapeAttr(url) + '"></video>';
     } else if (item.kind === 'audio') {
@@ -1039,6 +1077,9 @@
     ];
     if (item.oldRel) rows.push(['旧路径', item.oldRel]);
     if (item.hash) rows.push(['Hash', item.hash]);
+    if (item.blobSha) rows.push(['Blob', item.blobSha]);
+    if (item.size) rows.push(['大小', formatBytes(item.size)]);
+    if (item.commitSha) rows.push(['Commit', item.commitSha.slice(0, 12) + '…']);
     if (item.dateStr) rows.push(['时间', item.dateStr]);
     if (item.dupCount > 1) rows.push(['重复', '同 hash 共 ' + item.dupCount + ' 个']);
 
@@ -1176,9 +1217,16 @@
     const prev = ITEMS.length;
     if (!silent) setStatus('正在从 GitHub 同步…');
     try {
+      await fetchRepoHead();
       await fetchOldMapFromRemote();
       const paths = await fetchRemotePaths();
-      ITEMS = paths.map(p => buildItem(p.slice(7), OLD_MAP[p]));
+      const prevMeta = new Map(ITEMS.map(i => [i.newRel, i]));
+      ITEMS = paths.map(p => {
+        const item = buildItem(p.slice(7), OLD_MAP[p]);
+        const old = prevMeta.get(item.newRel);
+        if (old && old.rev) item.rev = old.rev;
+        return item;
+      });
       phashCache.clear();
       similarScanned = false;
       autoSmartSelected = false;
@@ -1219,13 +1267,17 @@
     const result = await putFileViaGit(rel, content, 'gallery: replace ' + rel);
 
     const newSha = result && result.content && result.content.sha;
+    const commitSha = result && result.commitSha;
+    bumpRepoHead(commitSha);
     const name = rel.slice(7);
     const idx = ITEMS.findIndex(i => i.newRel === rel);
     if (idx >= 0) {
       const oldRel = ITEMS[idx].oldRel;
       ITEMS[idx] = buildItem(name, oldRel);
-      ITEMS[idx].sha = newSha;
+      ITEMS[idx].blobSha = newSha;
+      ITEMS[idx].commitSha = commitSha;
       ITEMS[idx].rev = Date.now();
+      ITEMS[idx].size = file.size;
     }
     phashCache.delete(rel);
     rebuildDupIndex();
@@ -1236,8 +1288,20 @@
     if (!token()) throw new Error('请先 GitHub 登录');
     if (!confirm('确认删除？\n' + rel + '\n此操作不可恢复。')) return false;
     setStatus('删除中…');
-    const meta = await getFileMeta(rel);
-    await deleteFile(rel, meta.sha);
+    let lastErr;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const meta = await getFileMeta(rel);
+        await deleteFile(rel, meta.sha);
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        if (!/does not match|409/i.test(e.message) || attempt === 4) throw e;
+        await sleep(400 * (attempt + 1));
+      }
+    }
+    if (lastErr) throw lastErr;
     ITEMS = ITEMS.filter(x => x.newRel !== rel);
     selected.delete(rel);
     if (detailItem && detailItem.newRel === rel) closeDetail();
@@ -1481,12 +1545,13 @@
       setStatus('替换上传中…');
       try {
         const updated = await replaceFile(rel, file);
+        bumpRepoHead(updated && updated.commitSha);
         filter();
         if (updated) {
-          detailItem = updated;
-          openDetail(updated);
+          detailItem = itemByRel(rel) || updated;
+          openDetail(detailItem);
         }
-        setStatus('替换成功', 'ok');
+        setStatus('替换成功 · ' + formatBytes(file.size), 'ok');
       } catch (e) {
         setStatus('替换失败: ' + e.message, 'err');
       }
