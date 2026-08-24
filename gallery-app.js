@@ -1,4 +1,4 @@
-/* PictureBed4PicGo gallery — sync / dup mark / manage */
+/* PictureBed4PicGo gallery — Immich layout + multi-type preview */
 (function (global) {
   'use strict';
 
@@ -8,23 +8,70 @@
   const OAUTH_VERIFIER_KEY = 'pb4pg_code_verifier';
   const OAUTH_SECRET_KEY = 'pb4pg_oauth_secret';
   const HASH_RE = /([a-f0-9]{32})(?:-\d+)?\.[^.]+$/i;
+  const DATE_RE = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/;
+
+  const EXT_MAP = {
+    image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'heic', 'heif'],
+    video: ['mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v', 'ogv'],
+    audio: ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'opus'],
+    document: ['pdf'],
+    text: ['txt', 'md', 'json', 'csv', 'xml', 'html', 'htm', 'css', 'js', 'ts', 'yaml', 'yml', 'log', 'sql', 'sh', 'bat', 'ps1']
+  };
+
+  const TYPE_ICONS = {
+    image: '🖼', video: '▶', audio: '♫', document: '📄', text: '⌨', other: '📦'
+  };
 
   let ITEMS = [];
   let OLD_MAP = {};
   let filtered = [];
   const selected = new Set();
   let focused = null;
-  let dupOnly = false;
+  let detailItem = null;
+  let lightboxIdx = -1;
+  let category = 'all';
+  let viewMode = 'grid';
+  let sortBy = 'date-desc';
   let devicePollAbort = null;
   const hashGroups = new Map();
+
+  function extOf(name) {
+    const i = name.lastIndexOf('.');
+    return i >= 0 ? name.slice(i + 1).toLowerCase() : '';
+  }
+
+  function fileKind(name) {
+    const ext = extOf(name);
+    for (const [kind, exts] of Object.entries(EXT_MAP)) {
+      if (exts.includes(ext)) return kind;
+    }
+    return 'other';
+  }
+
+  function extractDate(name) {
+    const m = String(name).match(DATE_RE);
+    if (!m) return null;
+    const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function formatDate(d) {
+    if (!d) return '';
+    const pad = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+      ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  function monthKey(d) {
+    if (!d) return '未知日期';
+    return d.getFullYear() + '年' + (d.getMonth() + 1) + '月';
+  }
 
   function apiBase() {
     return 'https://api.github.com/repos/' + REPO.owner + '/' + REPO.repo;
   }
 
-  function oauthCfg() {
-    return global.OAUTH || {};
-  }
+  function oauthCfg() { return global.OAUTH || {}; }
 
   function oauthClientId() {
     const cfgId = String(oauthCfg().clientId || '').trim();
@@ -52,10 +99,7 @@
 
   function registerGithubApp() {
     const redirect = oauthRedirectUri();
-    if (!redirect) {
-      setStatus('请通过 GitHub Pages 打开本页', 'err');
-      return;
-    }
+    if (!redirect) { setStatus('请通过 GitHub Pages 打开本页', 'err'); return; }
     const form = document.createElement('form');
     form.method = 'POST';
     form.action = 'https://github.com/settings/apps/new';
@@ -73,22 +117,15 @@
     const params = new URLSearchParams(location.search);
     const code = params.get('code');
     if (!code || params.get('setup_action') === 'install') return false;
-
     setStatus('正在注册 GitHub App…');
     const res = await fetch('https://api.github.com/app-manifests/' + encodeURIComponent(code) + '/conversions', {
       method: 'POST',
       headers: { Accept: 'application/vnd.github+json' }
     });
     const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.message || 'GitHub App 注册失败');
-    }
-    if (data.client_id) {
-      sessionStorage.setItem('pb4pg_oauth_client_id', data.client_id);
-    }
-    if (data.client_secret) {
-      sessionStorage.setItem(OAUTH_SECRET_KEY, data.client_secret);
-    }
+    if (!res.ok) throw new Error(data.message || 'GitHub App 注册失败');
+    if (data.client_id) sessionStorage.setItem('pb4pg_oauth_client_id', data.client_id);
+    if (data.client_secret) sessionStorage.setItem(OAUTH_SECRET_KEY, data.client_secret);
     history.replaceState(null, '', location.pathname + location.hash);
     setStatus('GitHub App 已就绪，正在登录…', 'ok');
     return data;
@@ -101,9 +138,7 @@
     return location.origin + location.pathname;
   }
 
-  function token() {
-    return sessionStorage.getItem(TOKEN_KEY) || '';
-  }
+  function token() { return sessionStorage.getItem(TOKEN_KEY) || ''; }
 
   function randomString(len) {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
@@ -123,9 +158,7 @@
     return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
 
-  function sleep(ms) {
-    return new Promise(r => setTimeout(r, ms));
-  }
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
   async function oauthTokenExchange(body) {
     const res = await fetch('https://github.com/login/oauth/access_token', {
@@ -159,16 +192,13 @@
     const params = new URLSearchParams(location.search);
     const code = params.get('code');
     if (!code || !oauthClientId()) return false;
-
     const state = params.get('state');
     const saved = sessionStorage.getItem(OAUTH_STATE_KEY);
     const verifier = sessionStorage.getItem(OAUTH_VERIFIER_KEY);
     sessionStorage.removeItem(OAUTH_STATE_KEY);
     sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
     history.replaceState(null, '', location.pathname + location.hash);
-
     if (!state || state !== saved) throw new Error('OAuth 校验失败，请重试');
-
     setStatus('正在完成 GitHub 登录…');
     const body = new URLSearchParams({
       client_id: oauthClientId(),
@@ -178,7 +208,6 @@
     if (verifier) body.set('code_verifier', verifier);
     const secret = oauthClientSecret();
     if (secret) body.set('client_secret', secret);
-
     const data = await oauthTokenExchange(body);
     if (data.error) {
       if (oauthClientSecret()) throw new Error(data.error_description || data.error);
@@ -194,26 +223,12 @@
   async function startOAuthRedirect() {
     const clientId = oauthClientId();
     const redirectUri = oauthRedirectUri();
-    if (!clientId) {
-      setStatus('OAuth 未配置 Client ID', 'err');
-      return;
-    }
-    if (!redirectUri) {
-      setStatus('请通过 GitHub Pages 打开本页以使用 GitHub 登录', 'err');
-      return;
-    }
-
+    if (!clientId) { setStatus('OAuth 未配置 Client ID', 'err'); return; }
+    if (!redirectUri) { setStatus('请通过 GitHub Pages 打开本页以使用 GitHub 登录', 'err'); return; }
     const state = randomString(24);
     sessionStorage.setItem(OAUTH_STATE_KEY, state);
-    const params = new URLSearchParams({
-      client_id: clientId,
-      redirect_uri: redirectUri,
-      state
-    });
-    if (!oauthClientSecret()) {
-      params.set('scope', oauthCfg().scope || 'repo');
-    }
-
+    const params = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, state });
+    if (!oauthClientSecret()) params.set('scope', oauthCfg().scope || 'repo');
     if (!oauthClientSecret()) {
       const verifier = randomString(96);
       const challenge = await sha256Base64Url(verifier);
@@ -221,7 +236,6 @@
       params.set('code_challenge', challenge);
       params.set('code_challenge_method', 'S256');
     }
-
     location.assign('https://github.com/login/oauth/authorize?' + params.toString());
   }
 
@@ -229,30 +243,20 @@
     if (devicePollAbort) devicePollAbort.aborted = true;
     const abort = { aborted: false };
     devicePollAbort = abort;
-
     let wait = Math.max(5, intervalSec || 5);
     const deadline = Date.now() + 900000;
-
     while (!abort.aborted && Date.now() < deadline) {
       await sleep(wait * 1000);
       const body = new URLSearchParams({
         client_id: oauthClientId(),
         device_code: deviceCode,
-        grant_type: 'urn:ietf:params:oauth:grant-type:device_code'
+        grant_type: 'urn:ietf:params:oauth:device_code'
       });
       const data = await oauthTokenExchange(body);
       if (data.error === 'authorization_pending') continue;
-      if (data.error === 'slow_down') {
-        wait += 5;
-        continue;
-      }
-      if (data.error) {
-        throw new Error(data.error_description || data.error);
-      }
-      if (data.access_token) {
-        devicePollAbort = null;
-        return data.access_token;
-      }
+      if (data.error === 'slow_down') { wait += 5; continue; }
+      if (data.error) throw new Error(data.error_description || data.error);
+      if (data.access_token) { devicePollAbort = null; return data.access_token; }
     }
     devicePollAbort = null;
     throw new Error('授权超时，请重试');
@@ -260,34 +264,21 @@
 
   async function startDeviceLogin() {
     const clientId = oauthClientId();
-    if (!clientId) {
-      setStatus('OAuth 未配置 Client ID', 'err');
-      return;
-    }
-    if (oauthClientSecret()) {
-      setStatus('请使用 GitHub 登录按钮（浏览器授权）', 'err');
-      return;
-    }
-
+    if (!clientId) { setStatus('OAuth 未配置 Client ID', 'err'); return; }
+    if (oauthClientSecret()) { setStatus('请使用 GitHub 登录按钮（浏览器授权）', 'err'); return; }
     setStatus('正在连接 GitHub…');
     const res = await fetch('https://github.com/login/device/code', {
       method: 'POST',
       headers: { Accept: 'application/json' },
-      body: new URLSearchParams({
-        client_id: clientId,
-        scope: oauthCfg().scope || 'repo'
-      })
+      body: new URLSearchParams({ client_id: clientId, scope: oauthCfg().scope || 'repo' })
     });
     const data = await res.json();
     if (data.error || data.message) {
       throw new Error(data.error_description || data.message || data.error || '设备码请求失败');
     }
-
-    const verifyUrl = data.verification_uri +
-      '?user_code=' + encodeURIComponent(data.user_code);
+    const verifyUrl = data.verification_uri + '?user_code=' + encodeURIComponent(data.user_code);
     window.open(verifyUrl, 'pb4pg_github_auth', 'noopener,width=520,height=720');
-    setStatus('已在 GitHub 打开授权页（已登录则直接点 Authorize）…');
-
+    setStatus('已在 GitHub 打开授权页…');
     const accessToken = await pollDeviceToken(data.device_code, data.interval);
     await saveToken(accessToken);
     setStatus('GitHub 登录成功', 'ok');
@@ -295,21 +286,13 @@
 
   async function loginGithub() {
     try {
-      const redirect = oauthRedirectUri();
-      if (!redirect) {
-        setStatus('请通过 GitHub Pages 打开本页以登录', 'err');
-        return;
-      }
+      if (!oauthRedirectUri()) { setStatus('请通过 GitHub Pages 打开本页以登录', 'err'); return; }
       if (!oauthClientId()) {
         setStatus('首次使用：正在跳转 GitHub 注册应用…');
         registerGithubApp();
         return;
       }
-      if (oauthRedirectUri()) {
-        await startOAuthRedirect();
-      } else {
-        await startDeviceLogin();
-      }
+      await startOAuthRedirect();
     } catch (e) {
       setStatus('登录失败: ' + e.message, 'err');
     }
@@ -322,6 +305,8 @@
     sessionStorage.removeItem(OAUTH_STATE_KEY);
     sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
     selected.clear();
+    detailItem = null;
+    closeDetail();
     const pat = document.getElementById('pat');
     if (pat) pat.value = '';
     showAuthUI();
@@ -357,21 +342,35 @@
       item.dupCount = g && g.length > 1 ? g.length : 0;
     });
     const dupFiles = ITEMS.filter(i => i.dupCount > 0).length;
-    const dupSets = [...hashGroups.values()].filter(g => g.length > 1).length;
     const el = document.getElementById('dupCount');
     if (el) el.textContent = String(dupFiles);
-    return { dupFiles, dupSets };
+    return dupFiles;
+  }
+
+  function updateCategoryCounts() {
+    const counts = { all: ITEMS.length, image: 0, video: 0, audio: 0, document: 0, text: 0, other: 0 };
+    ITEMS.forEach(i => { if (counts[i.kind] !== undefined) counts[i.kind]++; });
+    Object.keys(counts).forEach(k => {
+      const el = document.getElementById('cnt' + k.charAt(0).toUpperCase() + k.slice(1));
+      if (el) el.textContent = String(counts[k]);
+    });
   }
 
   function buildItem(name, oldRel) {
     const rel = 'images/' + name;
     const enc = encodePath(rel);
     const hash = extractHash(name);
+    const kind = fileKind(name);
+    const date = extractDate(name);
     return {
       name,
       newRel: rel,
       oldRel: oldRel || OLD_MAP[rel] || '',
       hash,
+      kind,
+      ext: extOf(name),
+      date,
+      dateStr: formatDate(date),
       dupCount: 0,
       cdn: 'https://cdn.jsdelivr.net/gh/' + REPO.owner + '/' + REPO.repo + '@' + REPO.branch + '/' + enc,
       raw: 'https://raw.githubusercontent.com/' + REPO.owner + '/' + REPO.repo + '/' + REPO.branch + '/' + enc
@@ -385,10 +384,7 @@
     const res = await fetch(apiBase() + path, { ...opts, headers });
     if (!res.ok) {
       let detail = res.status + ' ' + res.statusText;
-      try {
-        const j = await res.json();
-        if (j.message) detail = j.message;
-      } catch (_) { /* ignore */ }
+      try { const j = await res.json(); if (j.message) detail = j.message; } catch (_) { /* ignore */ }
       throw new Error(detail);
     }
     if (res.status === 204) return null;
@@ -404,8 +400,7 @@
   }
 
   async function fetchOldMapFromRemote() {
-    const url =
-      'https://raw.githubusercontent.com/' +
+    const url = 'https://raw.githubusercontent.com/' +
       REPO.owner + '/' + REPO.repo + '/' + REPO.branch + '/rename-mapping.csv';
     const res = await fetch(url);
     if (!res.ok) return;
@@ -425,20 +420,12 @@
     await ghFetch('/contents/' + encodePath(relPath), {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: msg || 'gallery: delete ' + relPath,
-        sha,
-        branch: REPO.branch
-      })
+      body: JSON.stringify({ message: msg || 'gallery: delete ' + relPath, sha, branch: REPO.branch })
     });
   }
 
   async function putFile(relPath, contentBase64, sha, msg) {
-    const body = {
-      message: msg || 'gallery: update ' + relPath,
-      content: contentBase64,
-      branch: REPO.branch
-    };
+    const body = { message: msg || 'gallery: update ' + relPath, content: contentBase64, branch: REPO.branch };
     if (sha) body.sha = sha;
     return ghFetch('/contents/' + encodePath(relPath), {
       method: 'PUT',
@@ -465,19 +452,21 @@
   function updateSelUI() {
     const n = selected.size;
     const el = document.getElementById('selCount');
-    if (el) el.textContent = '已选 ' + n;
-    const del = document.getElementById('batchDelete');
-    const ren = document.getElementById('batchRename');
-    const rep = document.getElementById('batchReplace');
-    if (del) del.disabled = n === 0;
-    if (ren) ren.disabled = n !== 1;
-    if (rep) rep.disabled = n !== 1;
+    if (el) el.textContent = String(n);
+    ['batchDelete', 'batchRename', 'batchReplace'].forEach(id => {
+      const btn = document.getElementById(id);
+      if (!btn) return;
+      if (id === 'batchDelete') btn.disabled = n === 0;
+      else btn.disabled = n !== 1;
+    });
     const all = document.getElementById('selectAll');
     if (all && filtered.length) {
       const allSel = filtered.every(i => selected.has(i.newRel));
       all.checked = allSel;
       all.indeterminate = n > 0 && !allSel;
     }
+    const manageBar = document.getElementById('manageBar');
+    if (manageBar && token()) manageBar.classList.remove('hidden');
   }
 
   function toggleSelect(rel, on) {
@@ -486,101 +475,298 @@
     updateSelUI();
   }
 
+  function thumbHtml(item, url, small) {
+    const k = item.kind;
+    if (k === 'image') {
+      return '<img loading="lazy" alt="" src="' + escapeAttr(url) + '">';
+    }
+    if (k === 'video') {
+      return '<video muted preload="metadata" src="' + escapeAttr(url) + '"></video>';
+    }
+    const icon = TYPE_ICONS[k] || TYPE_ICONS.other;
+    const cls = small ? 'thumb-ext' : 'thumb-icon';
+    return '<span class="' + cls + '">' + (small ? escapeHtml(item.ext) : icon) + '</span>';
+  }
+
+  function sortList(list) {
+    const sorted = [...list];
+    sorted.sort((a, b) => {
+      if (sortBy === 'name-asc') return a.name.localeCompare(b.name);
+      if (sortBy === 'name-desc') return b.name.localeCompare(a.name);
+      if (sortBy === 'type') return a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name);
+      const da = a.date ? a.date.getTime() : 0;
+      const db = b.date ? b.date.getTime() : 0;
+      return sortBy === 'date-asc' ? da - db : db - da;
+    });
+    return sorted;
+  }
+
+  function groupByMonth(list) {
+    const groups = new Map();
+    list.forEach(item => {
+      const key = monthKey(item.date);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    });
+    return groups;
+  }
+
+  function renderGrid(list) {
+    const hasToken = !!token();
+    const groups = groupByMonth(list);
+    let html = '';
+    groups.forEach((items, title) => {
+      html += '<div class="date-group"><div class="date-group-title">' + escapeHtml(title) + '</div><div class="grid">';
+      items.forEach((item, idx) => {
+        const url = srcOf(item);
+        const isDup = item.dupCount > 1;
+        const sel = selected.has(item.newRel);
+        html += '<article class="card' + (sel ? ' selected' : '') + (isDup ? ' dup' : '') + '" data-rel="' + escapeAttr(item.newRel) + '" style="animation-delay:' + Math.min(idx, 20) * 10 + 'ms">';
+        if (hasToken) {
+          html += '<input type="checkbox" class="card-check"' + (sel ? ' checked' : '') + '>';
+        }
+        if (isDup) html += '<span class="badge">重复 ×' + item.dupCount + '</span>';
+        if (item.kind !== 'image') html += '<span class="type-badge">' + escapeHtml(item.ext) + '</span>';
+        html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
+        html += '<div class="card-hover">';
+        html += '<button type="button" data-action="copy-url">链接</button>';
+        html += '<button type="button" data-action="preview">预览</button>';
+        if (hasToken) html += '<button type="button" class="del" data-action="delete">删除</button>';
+        html += '</div>';
+        html += '<div class="card-meta"><div class="card-name">' + escapeHtml(item.name) + '</div>';
+        if (item.dateStr) html += '<div class="card-date">' + escapeHtml(item.dateStr) + '</div>';
+        html += '</div></article>';
+      });
+      html += '</div></div>';
+    });
+    return html;
+  }
+
+  function renderList(list) {
+    const hasToken = !!token();
+    let html = '<div class="list">';
+    list.forEach(item => {
+      const url = srcOf(item);
+      const sel = selected.has(item.newRel);
+      html += '<div class="list-row' + (sel ? ' selected' : '') + '" data-rel="' + escapeAttr(item.newRel) + '">';
+      html += '<div class="list-thumb">' + thumbHtml(item, url, true) + '</div>';
+      html += '<div class="list-info"><div class="name">' + escapeHtml(item.name) + '</div>';
+      html += '<div class="sub">' + escapeHtml(item.kind) + (item.dateStr ? ' · ' + item.dateStr : '') + '</div></div>';
+      html += '<div class="list-actions">';
+      html += '<button type="button" data-action="copy-url">链接</button>';
+      html += '<button type="button" data-action="preview">预览</button>';
+      if (hasToken) html += '<button type="button" data-action="delete">删除</button>';
+      html += '</div>';
+      if (hasToken) {
+        html += '<input type="checkbox"' + (sel ? ' checked' : '') + ' style="accent-color:var(--accent)">';
+      }
+      html += '</div>';
+    });
+    html += '</div>';
+    return html;
+  }
+
   function render(list) {
     filtered = list;
-    const grid = document.getElementById('grid');
+    const container = document.getElementById('mediaContainer');
     const stats = document.getElementById('stats');
-    if (!grid) return;
-    grid.innerHTML = '';
+    if (!container) return;
 
-    const dupInfo = rebuildDupIndex();
+    rebuildDupIndex();
+    updateCategoryCounts();
+
     if (stats) {
-      stats.innerHTML =
-        '显示 <strong>' + list.length + '</strong> / ' + ITEMS.length +
-        ' · 重复集 <strong>' + dupInfo.dupSets + '</strong>' +
-        ' · 重复文件 <strong>' + dupInfo.dupFiles + '</strong>';
+      stats.innerHTML = '显示 <strong>' + list.length + '</strong> / ' + ITEMS.length + ' 个文件';
     }
 
     if (!list.length) {
-      grid.innerHTML = '<div class="empty">没有匹配结果</div>';
+      container.innerHTML = '<div class="empty">没有匹配结果</div>';
       updateSelUI();
       return;
     }
 
-    const hasToken = !!token();
-    list.forEach((item, idx) => {
-      const card = document.createElement('article');
-      const isDup = item.dupCount > 1;
-      card.className = 'card' +
-        (selected.has(item.newRel) ? ' selected' : '') +
-        (isDup ? ' dup' : '');
-      card.style.animationDelay = Math.min(idx, 24) * 12 + 'ms';
-      card.dataset.rel = item.newRel;
-
-      const url = srcOf(item);
-      const checkHtml = hasToken
-        ? '<input type="checkbox" class="card-check" data-rel="' + escapeAttr(item.newRel) + '"' +
-          (selected.has(item.newRel) ? ' checked' : '') + '>'
-        : '';
-      const badgeHtml = isDup
-        ? '<span class="badge" title="同 hash 共 ' + item.dupCount + ' 张">重复 ×' + item.dupCount + '</span>'
-        : '';
-
-      card.innerHTML =
-        checkHtml + badgeHtml +
-        '<div class="thumb-wrap"><img loading="lazy" alt="" src="' + escapeAttr(url) + '"></div>' +
-        '<div class="meta">' +
-        '<div class="name">' + escapeHtml(item.name) + '</div>' +
-        (item.hash ? '<div class="hash-tag">' + escapeHtml(item.hash.slice(0, 12)) + '…</div>' : '') +
-        (item.oldRel ? '<div class="old">旧: ' + escapeHtml(item.oldRel) + '</div>' : '') +
-        '<div class="actions">' +
-        '<button type="button" data-copy="' + escapeAttr(item.name) + '">文件名</button>' +
-        '<button type="button" data-copy="' + escapeAttr(url) + '">链接</button>' +
-        '<a href="' + escapeAttr(url) + '" target="_blank" rel="noopener">打开</a>' +
-        (hasToken
-          ? '<button type="button" data-rename="' + escapeAttr(item.newRel) + '">重命名</button>' +
-            '<button type="button" data-replace="' + escapeAttr(item.newRel) + '">替换</button>' +
-            '<button type="button" class="del" data-delete="' + escapeAttr(item.newRel) + '">删除</button>'
-          : '<button type="button" class="del" disabled title="请先 GitHub 登录">删除</button>') +
-        '</div></div>';
-
-      card.querySelector('.thumb-wrap').onclick = () => {
-        document.getElementById('modalImg').src = url;
-        document.getElementById('modal').classList.add('open');
-      };
-
-      const cb = card.querySelector('.card-check');
-      if (cb) {
-        cb.onclick = e => {
-          e.stopPropagation();
-          toggleSelect(item.newRel, cb.checked);
-          card.classList.toggle('selected', cb.checked);
-        };
-      }
-
-      card.onclick = e => {
-        if (e.target.closest('button, a, input')) return;
-        focused = item.name;
-      };
-
-      grid.appendChild(card);
-    });
+    container.innerHTML = viewMode === 'list' ? renderList(list) : renderGrid(list);
     updateSelUI();
   }
 
   function filter() {
     const kw = (document.getElementById('q').value || '').trim().toLowerCase();
     let list = ITEMS;
-    if (dupOnly) list = list.filter(i => i.dupCount > 1);
+    if (category === 'dup') list = list.filter(i => i.dupCount > 1);
+    else if (category !== 'all') list = list.filter(i => i.kind === category);
     if (kw) {
       list = list.filter(i =>
         i.name.toLowerCase().includes(kw) ||
         (i.oldRel && i.oldRel.toLowerCase().includes(kw)) ||
         (i.hash && i.hash.includes(kw)) ||
-        i.newRel.toLowerCase().includes(kw)
+        i.newRel.toLowerCase().includes(kw) ||
+        i.kind.includes(kw) ||
+        i.ext.includes(kw)
       );
     }
-    render(list);
+    render(sortList(list));
+  }
+
+  function itemByRel(rel) {
+    return ITEMS.find(i => i.newRel === rel);
+  }
+
+  function openDetail(item) {
+    detailItem = item;
+    document.getElementById('appShell').classList.add('detail-open');
+    const url = srcOf(item);
+    const preview = document.getElementById('detailPreview');
+    const body = document.getElementById('detailBody');
+    const actions = document.getElementById('detailActions');
+
+    if (item.kind === 'image') {
+      preview.innerHTML = '<img alt="" src="' + escapeAttr(url) + '">';
+    } else if (item.kind === 'video') {
+      preview.innerHTML = '<video controls src="' + escapeAttr(url) + '"></video>';
+    } else if (item.kind === 'audio') {
+      preview.innerHTML = '<audio controls src="' + escapeAttr(url) + '" style="width:90%"></audio>';
+    } else {
+      preview.innerHTML = '<span class="thumb-icon" style="font-size:3rem">' + TYPE_ICONS[item.kind] + '</span>';
+    }
+
+    const rows = [
+      ['文件名', item.name],
+      ['类型', item.kind + ' (.' + item.ext + ')'],
+      ['路径', item.newRel],
+      ['CDN', item.cdn],
+      ['Raw', item.raw]
+    ];
+    if (item.oldRel) rows.push(['旧路径', item.oldRel]);
+    if (item.hash) rows.push(['Hash', item.hash]);
+    if (item.dateStr) rows.push(['时间', item.dateStr]);
+    if (item.dupCount > 1) rows.push(['重复', '同 hash 共 ' + item.dupCount + ' 个']);
+
+    body.innerHTML = '<div class="detail-section"><h3>元数据</h3>' +
+      rows.map(([l, v]) =>
+        '<div class="meta-row"><div class="meta-label">' + escapeHtml(l) +
+        '</div><div class="meta-value">' + escapeHtml(v) + '</div></div>'
+      ).join('') + '</div>';
+
+    const hasToken = !!token();
+    actions.innerHTML =
+      '<button type="button" class="primary" data-action="copy-url">复制链接</button>' +
+      '<button type="button" data-action="copy-name">复制文件名</button>' +
+      '<button type="button" data-action="preview">全屏预览</button>' +
+      '<a href="' + escapeAttr(url) + '" target="_blank" rel="noopener">新窗口</a>' +
+      (hasToken
+        ? '<button type="button" data-action="rename">重命名</button>' +
+          '<button type="button" data-action="replace">替换</button>' +
+          '<button type="button" class="danger" data-action="delete">删除</button>'
+        : '');
+  }
+
+  function closeDetail() {
+    detailItem = null;
+    document.getElementById('appShell').classList.remove('detail-open');
+  }
+
+  async function renderLightbox(item) {
+    const url = srcOf(item);
+    const content = document.getElementById('lightboxContent');
+    const caption = document.getElementById('lightboxCaption');
+    content.innerHTML = '';
+    caption.textContent = item.name;
+
+    if (item.kind === 'image') {
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = item.name;
+      content.appendChild(img);
+    } else if (item.kind === 'video') {
+      const v = document.createElement('video');
+      v.src = url;
+      v.controls = true;
+      v.autoplay = true;
+      content.appendChild(v);
+    } else if (item.kind === 'audio') {
+      const a = document.createElement('audio');
+      a.src = url;
+      a.controls = true;
+      a.autoplay = true;
+      content.appendChild(a);
+    } else if (item.kind === 'document') {
+      const iframe = document.createElement('iframe');
+      iframe.src = url;
+      iframe.style.width = 'min(92vw, 900px)';
+      iframe.style.height = '75vh';
+      iframe.style.border = 'none';
+      iframe.style.borderRadius = '8px';
+      content.appendChild(iframe);
+    } else if (item.kind === 'text') {
+      const pre = document.createElement('pre');
+      pre.className = 'lightbox-text';
+      pre.textContent = '加载中…';
+      content.appendChild(pre);
+      try {
+        const res = await fetch(url);
+        const text = await res.text();
+        pre.textContent = text.length > 50000 ? text.slice(0, 50000) + '\n\n…(已截断)' : text;
+      } catch (e) {
+        pre.textContent = '无法加载文本: ' + e.message;
+      }
+    } else {
+      const div = document.createElement('div');
+      div.className = 'lightbox-text';
+      div.style.textAlign = 'center';
+      div.innerHTML = '<div style="font-size:4rem;margin-bottom:16px">' + TYPE_ICONS.other +
+        '</div><div>.' + escapeHtml(item.ext) + ' 文件暂不支持预览</div>' +
+        '<div style="margin-top:12px;opacity:.7"><a href="' + escapeAttr(url) +
+        '" target="_blank" rel="noopener" style="color:#93c5fd">下载 / 打开</a></div>';
+      content.appendChild(div);
+    }
+  }
+
+  function openLightbox(item) {
+    lightboxIdx = filtered.findIndex(i => i.newRel === item.newRel);
+    document.getElementById('lightbox').classList.add('open');
+    renderLightbox(item);
+  }
+
+  function closeLightbox() {
+    document.getElementById('lightbox').classList.remove('open');
+    document.getElementById('lightboxContent').innerHTML = '';
+    lightboxIdx = -1;
+  }
+
+  function lightboxNav(dir) {
+    if (!filtered.length) return;
+    lightboxIdx = (lightboxIdx + dir + filtered.length) % filtered.length;
+    renderLightbox(filtered[lightboxIdx]);
+  }
+
+  function handleAction(action, rel) {
+    const item = itemByRel(rel);
+    if (!item) return;
+    const url = srcOf(item);
+
+    if (action === 'copy-url') {
+      navigator.clipboard.writeText(url);
+      setStatus('已复制链接', 'ok');
+    } else if (action === 'copy-name') {
+      navigator.clipboard.writeText(item.name);
+      setStatus('已复制文件名', 'ok');
+    } else if (action === 'preview') {
+      openLightbox(item);
+    } else if (action === 'delete') {
+      deleteOne(rel).catch(err => setStatus('删除失败: ' + err.message, 'err'));
+    } else if (action === 'rename') {
+      const cur = rel.slice(7);
+      const newName = prompt('新文件名（images/ 下）', cur);
+      if (!newName || newName === cur) return;
+      setStatus('重命名中…');
+      renameFile(rel, newName)
+        .then(() => { filter(); setStatus('重命名成功', 'ok'); })
+        .catch(err => setStatus('重命名失败: ' + err.message, 'err'));
+    } else if (action === 'replace') {
+      const input = document.getElementById('replaceInput');
+      input.dataset.target = rel;
+      input.click();
+    }
   }
 
   async function refreshFromGitHub(silent) {
@@ -591,23 +777,18 @@
       const paths = await fetchRemotePaths();
       ITEMS = paths.map(p => buildItem(p.slice(7), OLD_MAP[p]));
       rebuildDupIndex();
+      updateCategoryCounts();
       selected.clear();
       filter();
-      if (!silent) {
-        setStatus('已同步 ' + ITEMS.length + ' 张', 'ok');
-      } else if (prev !== ITEMS.length) {
-        setStatus('已自动同步 ' + ITEMS.length + ' 张', 'ok');
-      } else {
-        setStatus('');
-      }
+      if (!silent) setStatus('已同步 ' + ITEMS.length + ' 个文件', 'ok');
+      else if (prev !== ITEMS.length) setStatus('已自动同步 ' + ITEMS.length + ' 个文件', 'ok');
+      else setStatus('');
     } catch (e) {
       rebuildDupIndex();
+      updateCategoryCounts();
       filter();
-      if (ITEMS.length) {
-        setStatus('在线同步失败，显示缓存 ' + ITEMS.length + ' 张', 'err');
-      } else {
-        setStatus('加载失败: ' + e.message, 'err');
-      }
+      if (ITEMS.length) setStatus('在线同步失败，显示缓存 ' + ITEMS.length + ' 个', 'err');
+      else setStatus('加载失败: ' + e.message, 'err');
     }
   }
 
@@ -619,13 +800,11 @@
     const meta = await getFileMeta(oldRel);
     await putFile(newRel, meta.content, null, 'gallery: rename to ' + newRel);
     await deleteFile(oldRel, meta.sha, 'gallery: remove old after rename ' + oldRel);
-    if (OLD_MAP[oldRel]) {
-      OLD_MAP[newRel] = OLD_MAP[oldRel];
-      delete OLD_MAP[oldRel];
-    }
+    if (OLD_MAP[oldRel]) { OLD_MAP[newRel] = OLD_MAP[oldRel]; delete OLD_MAP[oldRel]; }
     const idx = ITEMS.findIndex(i => i.newRel === oldRel);
     if (idx >= 0) ITEMS[idx] = buildItem(newName, OLD_MAP[newRel]);
     selected.delete(oldRel);
+    if (detailItem && detailItem.newRel === oldRel) detailItem = ITEMS[idx];
     rebuildDupIndex();
   }
 
@@ -654,6 +833,7 @@
     await deleteFile(rel, meta.sha);
     ITEMS = ITEMS.filter(x => x.newRel !== rel);
     selected.delete(rel);
+    if (detailItem && detailItem.newRel === rel) closeDetail();
     rebuildDupIndex();
     filter();
     setStatus('已删除 ' + rel.slice(7), 'ok');
@@ -682,10 +862,8 @@
     }
     rebuildDupIndex();
     filter();
-    setStatus(
-      ok === rels.length ? '已删除 ' + ok + ' 个文件' : '部分完成，成功 ' + ok + '/' + rels.length,
-      ok === rels.length ? 'ok' : 'err'
-    );
+    setStatus(ok === rels.length ? '已删除 ' + ok + ' 个文件' : '部分完成 ' + ok + '/' + rels.length,
+      ok === rels.length ? 'ok' : 'err');
   }
 
   function showAuthUI() {
@@ -699,196 +877,178 @@
     const userLabel = document.getElementById('authUser');
 
     if (loggedIn) {
-      if (manageBar) manageBar.classList.remove('hidden');
+      if (manageBar) { manageBar.classList.remove('hidden'); manageBar.style.display = 'flex'; }
       if (loginRow) loginRow.classList.add('hidden');
       if (loggedRow) loggedRow.classList.remove('hidden');
       if (userLabel) userLabel.textContent = user ? '@' + user : '已授权';
       if (st) st.textContent = '';
+      if (patRow) patRow.classList.add('hidden');
     } else {
       if (manageBar) manageBar.classList.add('hidden');
       if (loginRow) loginRow.classList.remove('hidden');
       if (loggedRow) loggedRow.classList.add('hidden');
       if (st) st.textContent = oauthClientId()
-        ? '已登录 GitHub 浏览器时，点登录后一键授权即可'
-        : '首次登录将自动注册 Gallery 应用（仅需一次）';
-    }
-    if (patRow) {
-      if (loggedIn) patRow.classList.add('hidden');
+        ? '已登录 GitHub 时一键授权'
+        : '首次登录自动注册应用';
     }
   }
 
   function bindEvents() {
-    const q = document.getElementById('q');
-    const source = document.getElementById('source');
-    if (q) q.oninput = filter;
-    if (source) source.onchange = filter;
+    document.getElementById('q').oninput = filter;
+    document.getElementById('source').onchange = () => { filter(); if (detailItem) openDetail(detailItem); };
+    document.getElementById('sort').onchange = e => { sortBy = e.target.value; filter(); };
 
     if (location.protocol !== 'file:') {
-      const localOpt = source && source.querySelector('option[value="local"]');
+      const localOpt = document.querySelector('#source option[value="local"]');
       if (localOpt) localOpt.remove();
     }
 
-    const dupChip = document.getElementById('dupFilterChip');
-    const dupCb = document.getElementById('dupOnly');
-    if (dupCb) {
-      dupCb.onchange = () => {
-        dupOnly = dupCb.checked;
-        if (dupChip) dupChip.classList.toggle('on', dupOnly);
+    document.querySelectorAll('.nav-item[data-cat]').forEach(btn => {
+      btn.onclick = () => {
+        category = btn.dataset.cat;
+        document.querySelectorAll('.nav-item[data-cat]').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
         filter();
       };
-    }
-
-    document.getElementById('grid').addEventListener('click', e => {
-      const copyBtn = e.target.closest('[data-copy]');
-      if (copyBtn) {
-        navigator.clipboard.writeText(copyBtn.dataset.copy);
-        const old = copyBtn.textContent;
-        copyBtn.textContent = '已复制';
-        setTimeout(() => { copyBtn.textContent = old; }, 1000);
-        return;
-      }
-
-      const del = e.target.closest('[data-delete]');
-      if (del) {
-        deleteOne(del.dataset.delete).catch(err => setStatus('删除失败: ' + err.message, 'err'));
-        return;
-      }
-
-      const ren = e.target.closest('[data-rename]');
-      if (ren) {
-        const rel = ren.dataset.rename;
-        const cur = rel.slice(7);
-        const newName = prompt('新文件名（images/ 下）', cur);
-        if (!newName || newName === cur) return;
-        setStatus('重命名中…');
-        renameFile(rel, newName)
-          .then(() => { filter(); setStatus('重命名成功', 'ok'); })
-          .catch(err => setStatus('重命名失败: ' + err.message, 'err'));
-        return;
-      }
-
-      const rep = e.target.closest('[data-replace]');
-      if (rep) {
-        const input = document.getElementById('replaceInput');
-        input.dataset.target = rep.dataset.replace;
-        input.click();
-      }
     });
 
-    const replaceInput = document.getElementById('replaceInput');
-    if (replaceInput) {
-      replaceInput.onchange = async () => {
-        const file = replaceInput.files && replaceInput.files[0];
-        const rel = replaceInput.dataset.target;
-        replaceInput.value = '';
-        if (!file || !rel) return;
-        setStatus('替换上传中…');
-        try {
-          await replaceFile(rel, file);
-          filter();
-          setStatus('替换成功', 'ok');
-        } catch (e) {
-          setStatus('替换失败: ' + e.message, 'err');
-        }
-      };
-    }
-
-    document.getElementById('copyName').onclick = () => {
-      if (!focused) return alert('先点一张图选中');
-      navigator.clipboard.writeText(focused);
+    document.getElementById('viewGrid').onclick = () => {
+      viewMode = 'grid';
+      document.getElementById('viewGrid').classList.add('active');
+      document.getElementById('viewList').classList.remove('active');
+      filter();
+    };
+    document.getElementById('viewList').onclick = () => {
+      viewMode = 'list';
+      document.getElementById('viewList').classList.add('active');
+      document.getElementById('viewGrid').classList.remove('active');
+      filter();
     };
 
-    document.getElementById('closeModal').onclick = () =>
-      document.getElementById('modal').classList.remove('open');
-    document.getElementById('modal').onclick = e => {
-      if (e.target.id === 'modal') document.getElementById('modal').classList.remove('open');
+    document.getElementById('mediaContainer').addEventListener('click', e => {
+      const actionBtn = e.target.closest('[data-action]');
+      const card = e.target.closest('[data-rel]');
+      if (!card) return;
+      const rel = card.dataset.rel;
+      const item = itemByRel(rel);
+
+      if (actionBtn) {
+        e.stopPropagation();
+        handleAction(actionBtn.dataset.action, rel);
+        return;
+      }
+
+      const cb = e.target.closest('input[type=checkbox]');
+      if (cb) {
+        e.stopPropagation();
+        toggleSelect(rel, cb.checked);
+        card.classList.toggle('selected', cb.checked);
+        return;
+      }
+
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+        toggleSelect(rel, !selected.has(rel));
+        filter();
+        return;
+      }
+
+      focused = item.name;
+      openDetail(item);
+    });
+
+    document.getElementById('detailClose').onclick = closeDetail;
+
+    document.getElementById('detailActions').addEventListener('click', e => {
+      const btn = e.target.closest('[data-action]');
+      if (!btn || !detailItem) return;
+      handleAction(btn.dataset.action, detailItem.newRel);
+    });
+
+    document.getElementById('lightboxClose').onclick = closeLightbox;
+    document.getElementById('lightbox').onclick = e => {
+      if (e.target.id === 'lightbox') closeLightbox();
     };
+    document.getElementById('lightboxPrev').onclick = e => { e.stopPropagation(); lightboxNav(-1); };
+    document.getElementById('lightboxNext').onclick = e => { e.stopPropagation(); lightboxNav(1); };
 
-    const loginBtn = document.getElementById('githubLogin');
-    if (loginBtn) loginBtn.onclick = () => loginGithub();
+    document.addEventListener('keydown', e => {
+      const lb = document.getElementById('lightbox');
+      if (!lb.classList.contains('open')) return;
+      if (e.key === 'Escape') closeLightbox();
+      if (e.key === 'ArrowLeft') lightboxNav(-1);
+      if (e.key === 'ArrowRight') lightboxNav(1);
+    });
 
-    const logoutBtn = document.getElementById('githubLogout');
-    if (logoutBtn) logoutBtn.onclick = () => logout();
-
+    document.getElementById('githubLogin').onclick = () => loginGithub();
+    document.getElementById('githubLogout').onclick = () => logout();
     document.getElementById('savePat').onclick = () => {
       const v = (document.getElementById('pat').value || '').trim();
       if (!v) return alert('请输入 PAT');
-      saveToken(v).then(() => setStatus('PAT 已保存（仅本标签页）', 'ok'));
+      saveToken(v).then(() => setStatus('PAT 已保存', 'ok'));
     };
-
     document.getElementById('clearPat').onclick = () => logout();
-
     document.getElementById('refreshList').onclick = () => refreshFromGitHub(false);
-
-    const refreshLogged = document.getElementById('refreshListLogged');
-    if (refreshLogged) refreshLogged.onclick = () => refreshFromGitHub(false);
+    document.getElementById('refreshListLogged').onclick = () => refreshFromGitHub(false);
 
     document.getElementById('selectAll').onchange = e => {
       const on = e.target.checked;
-      filtered.forEach(i => {
-        if (on) selected.add(i.newRel);
-        else selected.delete(i.newRel);
-      });
+      filtered.forEach(i => { if (on) selected.add(i.newRel); else selected.delete(i.newRel); });
       filter();
     };
 
     document.getElementById('batchDelete').onclick = () => batchDelete();
-
     document.getElementById('batchRename').onclick = () => {
       if (selected.size !== 1) return;
-      const rel = [...selected][0];
-      const cur = rel.slice(7);
-      const newName = prompt('新文件名', cur);
-      if (!newName || newName === cur) return;
-      setStatus('重命名中…');
-      renameFile(rel, newName)
-        .then(() => { filter(); setStatus('重命名成功', 'ok'); })
-        .catch(err => setStatus('重命名失败: ' + err.message, 'err'));
+      handleAction('rename', [...selected][0]);
     };
-
     document.getElementById('batchReplace').onclick = () => {
       if (selected.size !== 1) return;
-      const input = document.getElementById('replaceInput');
-      input.dataset.target = [...selected][0];
-      input.click();
+      handleAction('replace', [...selected][0]);
     };
 
-    const patToggle = document.getElementById('patToggle');
-    if (patToggle) {
-      patToggle.onclick = () => {
-        const row = document.getElementById('patRow');
-        if (row) row.classList.toggle('hidden');
-      };
-    }
+    document.getElementById('patToggle').onclick = () => {
+      document.getElementById('patRow').classList.toggle('hidden');
+    };
+
+    document.getElementById('replaceInput').onchange = async () => {
+      const input = document.getElementById('replaceInput');
+      const file = input.files && input.files[0];
+      const rel = input.dataset.target;
+      input.value = '';
+      if (!file || !rel) return;
+      setStatus('替换上传中…');
+      try {
+        await replaceFile(rel, file);
+        filter();
+        if (detailItem && detailItem.newRel === rel) openDetail(itemByRel(rel));
+        setStatus('替换成功', 'ok');
+      } catch (e) {
+        setStatus('替换失败: ' + e.message, 'err');
+      }
+    };
   }
 
   async function handleCallbackOnInit() {
     const params = new URLSearchParams(location.search);
     const code = params.get('code');
     if (!code) return;
-
-    if (params.get('state')) {
-      await handleOAuthReturn();
-      return;
-    }
-
+    if (params.get('state')) { await handleOAuthReturn(); return; }
     const manifest = await handleManifestReturn();
     if (manifest) await startOAuthRedirect();
   }
 
   async function init(opts) {
     ITEMS = (opts.items || []).map(i => {
-      if (i.hash !== undefined) return i;
+      if (i.kind !== undefined) return i;
       return buildItem(i.name, i.oldRel);
     });
     OLD_MAP = opts.oldMap || {};
     rebuildDupIndex();
+    updateCategoryCounts();
     bindEvents();
     showAuthUI();
 
-    try {
-      await handleCallbackOnInit();
-    } catch (e) {
+    try { await handleCallbackOnInit(); } catch (e) {
       setStatus('GitHub 登录失败: ' + e.message, 'err');
     }
 
@@ -897,11 +1057,8 @@
     }
 
     filter();
-    if (location.protocol !== 'file:') {
-      refreshFromGitHub(true);
-    } else {
-      setStatus('本地 file 打开：请用 GitHub Pages 以自动同步');
-    }
+    if (location.protocol !== 'file:') refreshFromGitHub(true);
+    else setStatus('本地 file 打开：请用 GitHub Pages 以自动同步');
   }
 
   global.GalleryApp = { init, refreshFromGitHub };
