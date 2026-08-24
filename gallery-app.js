@@ -1,13 +1,17 @@
-/* PictureBed4PicGo gallery — browse + GitHub Contents API management */
+/* PictureBed4PicGo gallery — sync / dup mark / manage */
 (function (global) {
   'use strict';
 
   const TOKEN_KEY = 'pb4pg_pat';
+  const HASH_RE = /([a-f0-9]{32})(?:-\d+)?\.[^.]+$/i;
+
   let ITEMS = [];
   let OLD_MAP = {};
   let filtered = [];
   const selected = new Set();
   let focused = null;
+  let dupOnly = false;
+  const hashGroups = new Map();
 
   function apiBase() {
     return 'https://api.github.com/repos/' + REPO.owner + '/' + REPO.repo;
@@ -17,24 +21,50 @@
     return sessionStorage.getItem(TOKEN_KEY) || '';
   }
 
-  function setStatus(msg, isErr) {
+  function setStatus(msg, kind) {
     const el = document.getElementById('status');
     if (!el) return;
     el.textContent = msg || '';
-    el.className = 'status' + (isErr ? ' err' : '');
+    el.className = 'status' + (kind === 'err' ? ' err' : kind === 'ok' ? ' ok' : '');
   }
 
   function encodePath(path) {
     return path.split('/').map(s => encodeURIComponent(s)).join('/');
   }
 
+  function extractHash(name) {
+    const m = String(name).match(HASH_RE);
+    return m ? m[1].toLowerCase() : '';
+  }
+
+  function rebuildDupIndex() {
+    hashGroups.clear();
+    ITEMS.forEach(item => {
+      if (!item.hash) return;
+      if (!hashGroups.has(item.hash)) hashGroups.set(item.hash, []);
+      hashGroups.get(item.hash).push(item.newRel);
+    });
+    ITEMS.forEach(item => {
+      const g = item.hash ? hashGroups.get(item.hash) : null;
+      item.dupCount = g && g.length > 1 ? g.length : 0;
+    });
+    const dupFiles = ITEMS.filter(i => i.dupCount > 0).length;
+    const dupSets = [...hashGroups.values()].filter(g => g.length > 1).length;
+    const el = document.getElementById('dupCount');
+    if (el) el.textContent = String(dupFiles);
+    return { dupFiles, dupSets };
+  }
+
   function buildItem(name, oldRel) {
     const rel = 'images/' + name;
     const enc = encodePath(rel);
+    const hash = extractHash(name);
     return {
       name,
       newRel: rel,
       oldRel: oldRel || OLD_MAP[rel] || '',
+      hash,
+      dupCount: 0,
       cdn: 'https://cdn.jsdelivr.net/gh/' + REPO.owner + '/' + REPO.repo + '@' + REPO.branch + '/' + enc,
       raw: 'https://raw.githubusercontent.com/' + REPO.owner + '/' + REPO.repo + '/' + REPO.branch + '/' + enc
     };
@@ -63,6 +93,20 @@
       .filter(t => t.type === 'blob' && t.path.startsWith('images/'))
       .map(t => t.path)
       .sort();
+  }
+
+  async function fetchOldMapFromRemote() {
+    const url =
+      'https://raw.githubusercontent.com/' +
+      REPO.owner + '/' + REPO.repo + '/' + REPO.branch + '/rename-mapping.csv';
+    const res = await fetch(url);
+    if (!res.ok) return;
+    const text = await res.text();
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    for (let i = 1; i < lines.length; i++) {
+      const m = lines[i].match(/^"([^"]*)","([^"]*)"/);
+      if (m && m[2]) OLD_MAP[m[2]] = m[1];
+    }
   }
 
   async function getFileMeta(relPath) {
@@ -102,6 +146,14 @@
     return item.cdn;
   }
 
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function escapeAttr(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  }
+
   function updateSelUI() {
     const n = selected.size;
     const el = document.getElementById('selCount');
@@ -120,44 +172,75 @@
     }
   }
 
+  function toggleSelect(rel, on) {
+    if (on) selected.add(rel);
+    else selected.delete(rel);
+    updateSelUI();
+  }
+
   function render(list) {
     filtered = list;
     const grid = document.getElementById('grid');
     const stats = document.getElementById('stats');
     if (!grid) return;
     grid.innerHTML = '';
-    if (stats) stats.textContent = '显示 ' + list.length + ' / ' + ITEMS.length + ' 张';
+
+    const dupInfo = rebuildDupIndex();
+    if (stats) {
+      stats.innerHTML =
+        '显示 <strong>' + list.length + '</strong> / ' + ITEMS.length +
+        ' · 重复集 <strong>' + dupInfo.dupSets + '</strong>' +
+        ' · 重复文件 <strong>' + dupInfo.dupFiles + '</strong>';
+    }
+
     if (!list.length) {
       grid.innerHTML = '<div class="empty">没有匹配结果</div>';
       updateSelUI();
       return;
     }
+
     const hasToken = !!token();
-    list.forEach(item => {
+    list.forEach((item, idx) => {
       const card = document.createElement('article');
-      card.className = 'card' + (selected.has(item.newRel) ? ' selected' : '');
+      const isDup = item.dupCount > 1;
+      card.className = 'card' +
+        (selected.has(item.newRel) ? ' selected' : '') +
+        (isDup ? ' dup' : '');
+      card.style.animationDelay = Math.min(idx, 24) * 12 + 'ms';
       card.dataset.rel = item.newRel;
+
       const url = srcOf(item);
       const checkHtml = hasToken
-        ? '<input type="checkbox" class="card-check" data-rel="' + item.newRel + '"' + (selected.has(item.newRel) ? ' checked' : '') + '>'
+        ? '<input type="checkbox" class="card-check" data-rel="' + escapeAttr(item.newRel) + '"' +
+          (selected.has(item.newRel) ? ' checked' : '') + '>'
         : '';
+      const badgeHtml = isDup
+        ? '<span class="badge" title="同 hash 共 ' + item.dupCount + ' 张">重复 ×' + item.dupCount + '</span>'
+        : '';
+
       card.innerHTML =
-        checkHtml +
-        '<div class="thumb-wrap"><img loading="lazy" alt="" src="' + url + '"></div>' +
+        checkHtml + badgeHtml +
+        '<div class="thumb-wrap"><img loading="lazy" alt="" src="' + escapeAttr(url) + '"></div>' +
         '<div class="meta">' +
         '<div class="name">' + escapeHtml(item.name) + '</div>' +
+        (item.hash ? '<div class="hash-tag">' + escapeHtml(item.hash.slice(0, 12)) + '…</div>' : '') +
         (item.oldRel ? '<div class="old">旧: ' + escapeHtml(item.oldRel) + '</div>' : '') +
         '<div class="actions">' +
-        '<button type="button" data-copy="' + escapeAttr(item.name) + '">复制文件名</button>' +
-        '<button type="button" data-copy="' + escapeAttr(url) + '">复制链接</button>' +
+        '<button type="button" data-copy="' + escapeAttr(item.name) + '">文件名</button>' +
+        '<button type="button" data-copy="' + escapeAttr(url) + '">链接</button>' +
         '<a href="' + escapeAttr(url) + '" target="_blank" rel="noopener">打开</a>' +
-        (hasToken ? '<button type="button" data-rename="' + escapeAttr(item.newRel) + '">重命名</button>' +
-          '<button type="button" data-replace="' + escapeAttr(item.newRel) + '">替换</button>' : '') +
+        (hasToken
+          ? '<button type="button" data-rename="' + escapeAttr(item.newRel) + '">重命名</button>' +
+            '<button type="button" data-replace="' + escapeAttr(item.newRel) + '">替换</button>' +
+            '<button type="button" class="del" data-delete="' + escapeAttr(item.newRel) + '">删除</button>'
+          : '<button type="button" class="del" disabled title="先保存 PAT">删除</button>') +
         '</div></div>';
+
       card.querySelector('.thumb-wrap').onclick = () => {
         document.getElementById('modalImg').src = url;
         document.getElementById('modal').classList.add('open');
       };
+
       const cb = card.querySelector('.card-check');
       if (cb) {
         cb.onclick = e => {
@@ -166,58 +249,30 @@
           card.classList.toggle('selected', cb.checked);
         };
       }
+
       card.onclick = e => {
         if (e.target.closest('button, a, input')) return;
         focused = item.name;
-        document.querySelectorAll('.card').forEach(c => {
-          if (!c.classList.contains('selected')) c.style.outline = '';
-        });
-        if (!selected.has(item.newRel)) card.style.outline = '2px solid #4a90e2';
       };
+
       grid.appendChild(card);
     });
     updateSelUI();
   }
 
-  function escapeHtml(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
-  function escapeAttr(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-  }
-
-  function toggleSelect(rel, on) {
-    if (on) selected.add(rel);
-    else selected.delete(rel);
-    updateSelUI();
-  }
-
   function filter() {
     const kw = (document.getElementById('q').value || '').trim().toLowerCase();
-    const list = !kw
-      ? ITEMS
-      : ITEMS.filter(i =>
-          i.name.toLowerCase().includes(kw) ||
-          (i.oldRel && i.oldRel.toLowerCase().includes(kw)) ||
-          i.newRel.toLowerCase().includes(kw)
-        );
-    render(list);
-  }
-
-  async function fetchOldMapFromRemote() {
-    const url =
-      'https://raw.githubusercontent.com/' +
-      REPO.owner + '/' + REPO.repo + '/' + REPO.branch + '/rename-mapping.csv';
-    const res = await fetch(url);
-    if (!res.ok) return;
-    const text = await res.text();
-    const lines = text.split(/\r?\n/).filter(Boolean);
-    if (lines.length < 2) return;
-    for (let i = 1; i < lines.length; i++) {
-      const m = lines[i].match(/^"([^"]*)","([^"]*)"/);
-      if (m && m[2]) OLD_MAP[m[2]] = m[1];
+    let list = ITEMS;
+    if (dupOnly) list = list.filter(i => i.dupCount > 1);
+    if (kw) {
+      list = list.filter(i =>
+        i.name.toLowerCase().includes(kw) ||
+        (i.oldRel && i.oldRel.toLowerCase().includes(kw)) ||
+        (i.hash && i.hash.includes(kw)) ||
+        i.newRel.toLowerCase().includes(kw)
+      );
     }
+    render(list);
   }
 
   async function refreshFromGitHub(silent) {
@@ -227,20 +282,23 @@
       await fetchOldMapFromRemote();
       const paths = await fetchRemotePaths();
       ITEMS = paths.map(p => buildItem(p.slice(7), OLD_MAP[p]));
+      rebuildDupIndex();
       selected.clear();
       filter();
       if (!silent) {
-        setStatus('已同步 ' + ITEMS.length + ' 张');
+        setStatus('已同步 ' + ITEMS.length + ' 张', 'ok');
       } else if (prev !== ITEMS.length) {
-        setStatus('已自动同步 ' + ITEMS.length + ' 张（新增 ' + (ITEMS.length - prev) + '）');
+        setStatus('已自动同步 ' + ITEMS.length + ' 张', 'ok');
       } else {
         setStatus('');
       }
     } catch (e) {
+      rebuildDupIndex();
+      filter();
       if (ITEMS.length) {
-        setStatus('在线同步失败，显示缓存 ' + ITEMS.length + ' 张', true);
+        setStatus('在线同步失败，显示缓存 ' + ITEMS.length + ' 张', 'err');
       } else {
-        setStatus('加载失败: ' + e.message, true);
+        setStatus('加载失败: ' + e.message, 'err');
       }
     }
   }
@@ -251,10 +309,8 @@
     const newRel = 'images/' + newName;
     if (newRel === oldRel) return;
     const meta = await getFileMeta(oldRel);
-    const content = meta.content;
-    const sha = meta.sha;
-    await putFile(newRel, content, null, 'gallery: rename to ' + newRel);
-    await deleteFile(oldRel, sha, 'gallery: remove old after rename ' + oldRel);
+    await putFile(newRel, meta.content, null, 'gallery: rename to ' + newRel);
+    await deleteFile(oldRel, meta.sha, 'gallery: remove old after rename ' + oldRel);
     if (OLD_MAP[oldRel]) {
       OLD_MAP[newRel] = OLD_MAP[oldRel];
       delete OLD_MAP[oldRel];
@@ -262,7 +318,7 @@
     const idx = ITEMS.findIndex(i => i.newRel === oldRel);
     if (idx >= 0) ITEMS[idx] = buildItem(newName, OLD_MAP[newRel]);
     selected.delete(oldRel);
-    if (selected.has(newRel)) selected.add(newRel);
+    rebuildDupIndex();
   }
 
   async function replaceFile(rel, file) {
@@ -270,12 +326,30 @@
     const buf = await file.arrayBuffer();
     const bytes = new Uint8Array(buf);
     let binary = '';
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
     const content = btoa(binary);
     await putFile(rel, content, meta.sha, 'gallery: replace ' + rel);
     const name = rel.slice(7);
     const idx = ITEMS.findIndex(i => i.newRel === rel);
     if (idx >= 0) ITEMS[idx] = buildItem(name, ITEMS[idx].oldRel);
+    rebuildDupIndex();
+  }
+
+  async function deleteOne(rel) {
+    if (!token()) throw new Error('请先保存 PAT');
+    if (!confirm('确认删除？\n' + rel + '\n此操作不可恢复。')) return false;
+    setStatus('删除中…');
+    const meta = await getFileMeta(rel);
+    await deleteFile(rel, meta.sha);
+    ITEMS = ITEMS.filter(x => x.newRel !== rel);
+    selected.delete(rel);
+    rebuildDupIndex();
+    filter();
+    setStatus('已删除 ' + rel.slice(7), 'ok');
+    return true;
   }
 
   async function batchDelete() {
@@ -294,12 +368,16 @@
         ok++;
         setStatus('删除中 ' + ok + '/' + rels.length + '…');
       } catch (e) {
-        setStatus('删除失败 ' + rel + ': ' + e.message, true);
+        setStatus('删除失败 ' + rel + ': ' + e.message, 'err');
         break;
       }
     }
+    rebuildDupIndex();
     filter();
-    setStatus(ok === rels.length ? '已删除 ' + ok + ' 个文件' : '部分完成，成功 ' + ok + '/' + rels.length);
+    setStatus(
+      ok === rels.length ? '已删除 ' + ok + ' 个文件' : '部分完成，成功 ' + ok + '/' + rels.length,
+      ok === rels.length ? 'ok' : 'err'
+    );
   }
 
   function showManageBar() {
@@ -307,7 +385,7 @@
     const st = document.getElementById('patStatus');
     if (token()) {
       if (bar) bar.classList.remove('hidden');
-      if (st) st.textContent = 'Token 已保存（仅本标签页 session）';
+      if (st) st.textContent = 'Token 已保存（仅本标签页）';
     } else {
       if (bar) bar.classList.add('hidden');
       if (st) st.textContent = '';
@@ -325,27 +403,45 @@
       if (localOpt) localOpt.remove();
     }
 
+    const dupChip = document.getElementById('dupFilterChip');
+    const dupCb = document.getElementById('dupOnly');
+    if (dupCb) {
+      dupCb.onchange = () => {
+        dupOnly = dupCb.checked;
+        if (dupChip) dupChip.classList.toggle('on', dupOnly);
+        filter();
+      };
+    }
+
     document.getElementById('grid').addEventListener('click', e => {
-      const btn = e.target.closest('[data-copy]');
-      if (btn) {
-        navigator.clipboard.writeText(btn.dataset.copy);
-        const old = btn.textContent;
-        btn.textContent = '已复制';
-        setTimeout(() => { btn.textContent = old; }, 1200);
+      const copyBtn = e.target.closest('[data-copy]');
+      if (copyBtn) {
+        navigator.clipboard.writeText(copyBtn.dataset.copy);
+        const old = copyBtn.textContent;
+        copyBtn.textContent = '已复制';
+        setTimeout(() => { copyBtn.textContent = old; }, 1000);
         return;
       }
+
+      const del = e.target.closest('[data-delete]');
+      if (del) {
+        deleteOne(del.dataset.delete).catch(err => setStatus('删除失败: ' + err.message, 'err'));
+        return;
+      }
+
       const ren = e.target.closest('[data-rename]');
       if (ren) {
         const rel = ren.dataset.rename;
         const cur = rel.slice(7);
-        const newName = prompt('新文件名（仅 images/ 下文件名）', cur);
+        const newName = prompt('新文件名（images/ 下）', cur);
         if (!newName || newName === cur) return;
         setStatus('重命名中…');
         renameFile(rel, newName)
-          .then(() => { filter(); setStatus('重命名成功'); })
-          .catch(err => setStatus('重命名失败: ' + err.message, true));
+          .then(() => { filter(); setStatus('重命名成功', 'ok'); })
+          .catch(err => setStatus('重命名失败: ' + err.message, 'err'));
         return;
       }
+
       const rep = e.target.closest('[data-replace]');
       if (rep) {
         const input = document.getElementById('replaceInput');
@@ -365,9 +461,9 @@
         try {
           await replaceFile(rel, file);
           filter();
-          setStatus('替换成功');
+          setStatus('替换成功', 'ok');
         } catch (e) {
-          setStatus('替换失败: ' + e.message, true);
+          setStatus('替换失败: ' + e.message, 'err');
         }
       };
     }
@@ -420,8 +516,8 @@
       if (!newName || newName === cur) return;
       setStatus('重命名中…');
       renameFile(rel, newName)
-        .then(() => { filter(); setStatus('重命名成功'); })
-        .catch(err => setStatus('重命名失败: ' + err.message, true));
+        .then(() => { filter(); setStatus('重命名成功', 'ok'); })
+        .catch(err => setStatus('重命名失败: ' + err.message, 'err'));
     };
 
     document.getElementById('batchReplace').onclick = () => {
@@ -433,16 +529,19 @@
   }
 
   function init(opts) {
-    ITEMS = opts.items || [];
+    ITEMS = (opts.items || []).map(i => {
+      if (i.hash !== undefined) return i;
+      return buildItem(i.name, i.oldRel);
+    });
     OLD_MAP = opts.oldMap || {};
+    rebuildDupIndex();
     bindEvents();
     showManageBar();
     filter();
-    // 在线打开时自动从 GitHub 拉最新列表，PicGo 上传后刷新页面即可
     if (location.protocol !== 'file:') {
       refreshFromGitHub(true);
     } else {
-      setStatus('本地 file 打开：显示嵌入缓存。请用 GitHub Pages 以自动同步。');
+      setStatus('本地 file 打开：请用 GitHub Pages 以自动同步');
     }
   }
 
