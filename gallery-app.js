@@ -34,6 +34,14 @@
   let sortBy = 'date-desc';
   let devicePollAbort = null;
   const hashGroups = new Map();
+  let exactSets = [];
+  let similarSets = [];
+  const phashCache = new Map();
+  let similarScanned = false;
+  let similarScanning = false;
+  let autoSmartSelected = false;
+  let similarThreshold = 8;
+  const PHASH_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']);
 
   function extOf(name) {
     const i = name.lastIndexOf('.');
@@ -330,6 +338,218 @@
     return m ? m[1].toLowerCase() : '';
   }
 
+  function canPhash(item) {
+    return item.kind === 'image' && PHASH_EXTS.has(item.ext);
+  }
+
+  function hammingDistance(a, b) {
+    if (!a || !b || a.length !== b.length) return 64;
+    let d = 0;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d++;
+    return d;
+  }
+
+  function loadImage(url) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('load failed'));
+      img.src = url;
+    });
+  }
+
+  async function computeDHash(item) {
+    if (phashCache.has(item.newRel)) return phashCache.get(item.newRel);
+    const urls = [item.raw, item.cdn];
+    let lastErr;
+    for (const url of urls) {
+      try {
+        const img = await loadImage(url);
+        const canvas = document.createElement('canvas');
+        canvas.width = 9;
+        canvas.height = 8;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, 9, 8);
+        const px = ctx.getImageData(0, 0, 9, 8).data;
+        let hash = '';
+        for (let y = 0; y < 8; y++) {
+          for (let x = 0; x < 8; x++) {
+            const i1 = (y * 9 + x) * 4;
+            const i2 = (y * 9 + x + 1) * 4;
+            const g1 = 0.299 * px[i1] + 0.587 * px[i1 + 1] + 0.114 * px[i1 + 2];
+            const g2 = 0.299 * px[i2] + 0.587 * px[i2 + 1] + 0.114 * px[i2 + 2];
+            hash += g1 > g2 ? '1' : '0';
+          }
+        }
+        phashCache.set(item.newRel, hash);
+        item.phash = hash;
+        return hash;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr || new Error('无法计算感知哈希');
+  }
+
+  function sortItemsByDate(items) {
+    return [...items].sort((a, b) => {
+      const da = a.date ? a.date.getTime() : 0;
+      const db = b.date ? b.date.getTime() : 0;
+      if (da !== db) return da - db;
+      return a.name.localeCompare(b.name);
+    });
+  }
+
+  function pickKeepItem(items) {
+    const sorted = sortItemsByDate(items);
+    return sorted[sorted.length - 1];
+  }
+
+  function buildExactSets() {
+    exactSets = [];
+    hashGroups.forEach((rels, hash) => {
+      if (rels.length < 2) return;
+      const items = rels.map(r => itemByRel(r)).filter(Boolean);
+      if (items.length < 2) return;
+      const keep = pickKeepItem(items);
+      exactSets.push({
+        id: 'exact-' + hash.slice(0, 12),
+        type: 'exact',
+        items: sortItemsByDate(items),
+        keepRel: keep.newRel
+      });
+    });
+    exactSets.sort((a, b) => b.items.length - a.items.length);
+  }
+
+  function isExactOnlyGroup(items) {
+    const hashes = new Set(items.map(i => i.hash).filter(Boolean));
+    return hashes.size === 1 && items.every(i => i.hash);
+  }
+
+  function clusterByPhash(items, threshold) {
+    const n = items.length;
+    const parent = items.map((_, i) => i);
+    function find(x) {
+      while (parent[x] !== x) {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+      }
+      return x;
+    }
+    function unite(a, b) {
+      const ra = find(a);
+      const rb = find(b);
+      if (ra !== rb) parent[rb] = ra;
+    }
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        if (hammingDistance(items[i].phash, items[j].phash) <= threshold) unite(i, j);
+      }
+    }
+    const buckets = new Map();
+    for (let i = 0; i < n; i++) {
+      const r = find(i);
+      if (!buckets.has(r)) buckets.set(r, []);
+      buckets.get(r).push(items[i]);
+    }
+    return [...buckets.values()].filter(g => g.length >= 2);
+  }
+
+  function buildSimilarSets() {
+    const images = ITEMS.filter(canPhash).filter(i => i.phash);
+    const clusters = clusterByPhash(images, similarThreshold);
+    similarSets = clusters
+      .filter(g => !isExactOnlyGroup(g))
+      .map((items, idx) => {
+        const sorted = sortItemsByDate(items);
+        const keep = sorted[sorted.length - 1];
+        const avgDist = computeGroupAvgDistance(sorted);
+        return {
+          id: 'sim-' + idx,
+          type: 'similar',
+          items: sorted,
+          keepRel: keep.newRel,
+          avgDistance: avgDist
+        };
+      })
+      .sort((a, b) => b.items.length - a.items.length);
+    const el = document.getElementById('similarCount');
+    if (el) el.textContent = String(similarSets.length);
+  }
+
+  function computeGroupAvgDistance(items) {
+    let sum = 0;
+    let cnt = 0;
+    for (let i = 0; i < items.length; i++) {
+      for (let j = i + 1; j < items.length; j++) {
+        sum += hammingDistance(items[i].phash, items[j].phash);
+        cnt++;
+      }
+    }
+    return cnt ? Math.round(sum / cnt) : 0;
+  }
+
+  async function scanSimilarImages(force) {
+    if (similarScanning) return;
+    if (similarScanned && !force) return;
+    similarScanning = true;
+    similarScanned = false;
+    similarSets = [];
+    const targets = ITEMS.filter(canPhash);
+    const total = targets.length;
+    if (!total) {
+      similarScanning = false;
+      similarScanned = true;
+      setStatus('没有可分析的图片格式', 'err');
+      filter();
+      return;
+    }
+    let done = 0;
+    const updateProgress = () => {
+      const pct = Math.round((done / total) * 100);
+      const container = document.getElementById('mediaContainer');
+      if (container && category === 'similar') {
+        container.innerHTML =
+          '<div class="scan-progress">' +
+          '<div>正在分析相似图片（感知哈希 dHash）…</div>' +
+          '<div class="bar"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
+          '<div>' + done + ' / ' + total + '</div></div>';
+      }
+      setStatus('相似分析 ' + done + '/' + total + '…');
+    };
+    updateProgress();
+    for (const item of targets) {
+      try {
+        await computeDHash(item);
+      } catch (_) {
+        /* skip unreadable images */
+      }
+      done++;
+      if (done % 3 === 0 || done === total) updateProgress();
+    }
+    buildSimilarSets();
+    similarScanning = false;
+    similarScanned = true;
+    autoSmartSelected = false;
+    setStatus('相似分析完成：' + similarSets.length + ' 组', 'ok');
+    filter();
+  }
+
+  function smartSelectGroups(sets, replace) {
+    if (replace) {
+      sets.forEach(g => g.items.forEach(i => selected.delete(i.newRel)));
+    }
+    sets.forEach(g => {
+      g.items.forEach(i => {
+        if (i.newRel !== g.keepRel) selected.add(i.newRel);
+        else selected.delete(i.newRel);
+      });
+    });
+    updateSelUI();
+  }
+
   function rebuildDupIndex() {
     hashGroups.clear();
     ITEMS.forEach(item => {
@@ -341,9 +561,11 @@
       const g = item.hash ? hashGroups.get(item.hash) : null;
       item.dupCount = g && g.length > 1 ? g.length : 0;
     });
+    buildExactSets();
     const dupFiles = ITEMS.filter(i => i.dupCount > 0).length;
     const el = document.getElementById('dupCount');
     if (el) el.textContent = String(dupFiles);
+    if (similarScanned) buildSimilarSets();
     return dupFiles;
   }
 
@@ -511,6 +733,94 @@
     return groups;
   }
 
+  function renderGroupCard(item, group, hasToken) {
+    const url = srcOf(item);
+    const sel = selected.has(item.newRel);
+    const isKeep = item.newRel === group.keepRel;
+    const isDup = item.dupCount > 1;
+    let html = '<article class="card' + (sel ? ' selected' : '') + (isKeep ? ' keep' : '') + (isDup ? ' dup' : '') +
+      '" data-rel="' + escapeAttr(item.newRel) + '">';
+    if (isKeep) html += '<span class="keep-badge">保留</span>';
+    if (hasToken) {
+      html += '<input type="checkbox" class="card-check"' + (sel ? ' checked' : '') + '>';
+    }
+    if (isDup && !isKeep) html += '<span class="badge">重复 ×' + item.dupCount + '</span>';
+    if (group.type === 'similar' && item.phash) {
+      html += '<span class="badge" style="border-color:rgba(79,110,247,.3);color:var(--accent)" title="感知哈希">相似</span>';
+    }
+    if (item.kind !== 'image') html += '<span class="type-badge">' + escapeHtml(item.ext) + '</span>';
+    html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
+    html += '<div class="card-hover">';
+    html += '<button type="button" data-action="copy-url">链接</button>';
+    html += '<button type="button" data-action="preview">预览</button>';
+    if (hasToken) html += '<button type="button" class="del" data-action="delete">删除</button>';
+    html += '</div>';
+    html += '<div class="card-meta"><div class="card-name">' + escapeHtml(item.name) + '</div>';
+    if (item.dateStr) html += '<div class="card-date">' + escapeHtml(item.dateStr) + '</div>';
+    html += '</div></article>';
+    return html;
+  }
+
+  function renderDupGroups(sets, mode) {
+    const hasToken = !!token();
+    let html = '<div class="dup-toolbar">';
+    html += '<div class="hint">';
+    if (mode === 'exact') {
+      html += '按文件名 hash 精确分组。已<strong>智能选中较旧副本</strong>，每组保留最新一张。';
+    } else {
+      html += '按感知哈希（dHash）检测视觉相似图，阈值 ' + similarThreshold + '。已智能选中较旧副本。';
+    }
+    html += '</div>';
+    html += '<button type="button" class="primary" data-dup-action="smart-select">智能选中待删</button>';
+    html += '<button type="button" data-dup-action="clear-select">取消选中</button>';
+    if (mode === 'similar') {
+      html += '<label>相似度 <input type="range" id="similarThreshold" min="3" max="15" value="' + similarThreshold + '"> <span id="thresholdVal">' + similarThreshold + '</span></label>';
+      html += '<button type="button" data-dup-action="rescan">重新扫描</button>';
+    }
+    html += '</div>';
+
+    if (!sets.length) {
+      html += '<div class="empty">' + (mode === 'exact' ? '未发现 hash 重复' : '未发现视觉相似组（可调低阈值后重新扫描）') + '</div>';
+      return html;
+    }
+
+    sets.forEach((group, gi) => {
+      const keepItem = itemByRel(group.keepRel);
+      const keepDate = keepItem && keepItem.dateStr ? keepItem.dateStr : '';
+      html += '<div class="dup-group" data-group-id="' + escapeAttr(group.id) + '">';
+      html += '<div class="dup-group-head">';
+      html += '<div class="dup-group-title">组 ' + (gi + 1) + ' · ' + group.items.length + ' 张';
+      if (mode === 'exact') html += '<span class="sub">hash 相同</span>';
+      else html += '<span class="sub">平均距离 ' + (group.avgDistance || 0) + '</span>';
+      if (keepDate) html += '<span class="sub">保留 ' + escapeHtml(keepDate) + '</span>';
+      html += '</div>';
+      html += '<div class="dup-group-actions">';
+      html += '<button type="button" data-group-action="smart" data-group-id="' + escapeAttr(group.id) + '">本组智能选中</button>';
+      html += '<button type="button" data-group-action="all" data-group-id="' + escapeAttr(group.id) + '">全选本组</button>';
+      html += '</div></div>';
+      html += '<div class="grid dup-group-grid">';
+      group.items.forEach(item => { html += renderGroupCard(item, group, hasToken); });
+      html += '</div></div>';
+    });
+    return html;
+  }
+
+  function getSetsForCategory() {
+    if (category === 'dup') return exactSets;
+    if (category === 'similar') return similarSets;
+    return [];
+  }
+
+  function flattenSets(sets) {
+    return sets.flatMap(g => g.items);
+  }
+
+  function findGroupById(id) {
+    return getSetsForCategory().find(g => g.id === id) ||
+      exactSets.find(g => g.id === id) ||
+      similarSets.find(g => g.id === id);
+  }
+
   function renderGrid(list) {
     const hasToken = !!token();
     const groups = groupByMonth(list);
@@ -567,7 +877,6 @@
   }
 
   function render(list) {
-    filtered = list;
     const container = document.getElementById('mediaContainer');
     const stats = document.getElementById('stats');
     if (!container) return;
@@ -575,6 +884,35 @@
     rebuildDupIndex();
     updateCategoryCounts();
 
+    if (category === 'dup' || category === 'similar') {
+      const mode = category;
+      const sets = mode === 'dup' ? exactSets : similarSets;
+
+      if (mode === 'similar' && !similarScanned && !similarScanning) {
+        container.innerHTML = '<div class="scan-progress"><div>进入相似检测…</div></div>';
+        scanSimilarImages(false);
+        return;
+      }
+      if (mode === 'similar' && similarScanning) return;
+
+      filtered = flattenSets(sets);
+      if (stats) {
+        const setLabel = mode === 'dup' ? '重复组' : '相似组';
+        stats.innerHTML = setLabel + ' <strong>' + sets.length + '</strong> · 共 <strong>' + filtered.length + '</strong> 张';
+      }
+
+      container.innerHTML = renderDupGroups(sets, mode);
+
+      if (!autoSmartSelected && sets.length) {
+        smartSelectGroups(sets, true);
+        autoSmartSelected = true;
+        container.innerHTML = renderDupGroups(sets, mode);
+      }
+      updateSelUI();
+      return;
+    }
+
+    filtered = list;
     if (stats) {
       stats.innerHTML = '显示 <strong>' + list.length + '</strong> / ' + ITEMS.length + ' 个文件';
     }
@@ -592,8 +930,11 @@
   function filter() {
     const kw = (document.getElementById('q').value || '').trim().toLowerCase();
     let list = ITEMS;
-    if (category === 'dup') list = list.filter(i => i.dupCount > 1);
-    else if (category !== 'all') list = list.filter(i => i.kind === category);
+    if (category === 'dup' || category === 'similar') {
+      render([]);
+      return;
+    }
+    if (category !== 'all') list = list.filter(i => i.kind === category);
     if (kw) {
       list = list.filter(i =>
         i.name.toLowerCase().includes(kw) ||
@@ -776,6 +1117,9 @@
       await fetchOldMapFromRemote();
       const paths = await fetchRemotePaths();
       ITEMS = paths.map(p => buildItem(p.slice(7), OLD_MAP[p]));
+      phashCache.clear();
+      similarScanned = false;
+      autoSmartSelected = false;
       rebuildDupIndex();
       updateCategoryCounts();
       selected.clear();
@@ -905,7 +1249,9 @@
 
     document.querySelectorAll('.nav-item[data-cat]').forEach(btn => {
       btn.onclick = () => {
-        category = btn.dataset.cat;
+        const next = btn.dataset.cat;
+        if (next !== category) autoSmartSelected = false;
+        category = next;
         document.querySelectorAll('.nav-item[data-cat]').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         filter();
@@ -926,6 +1272,45 @@
     };
 
     document.getElementById('mediaContainer').addEventListener('click', e => {
+      const dupBtn = e.target.closest('[data-dup-action]');
+      if (dupBtn) {
+        e.stopPropagation();
+        const action = dupBtn.dataset.dupAction;
+        const sets = getSetsForCategory();
+        if (action === 'smart-select') {
+          smartSelectGroups(sets, true);
+          filter();
+        } else if (action === 'clear-select') {
+          sets.forEach(g => g.items.forEach(i => selected.delete(i.newRel)));
+          updateSelUI();
+          filter();
+        } else if (action === 'rescan') {
+          similarScanned = false;
+          autoSmartSelected = false;
+          scanSimilarImages(true);
+        }
+        return;
+      }
+
+      const groupBtn = e.target.closest('[data-group-action]');
+      if (groupBtn) {
+        e.stopPropagation();
+        const g = findGroupById(groupBtn.dataset.groupId);
+        if (!g) return;
+        if (groupBtn.dataset.groupAction === 'smart') {
+          g.items.forEach(i => selected.delete(i.newRel));
+          g.items.forEach(i => {
+            if (i.newRel !== g.keepRel) selected.add(i.newRel);
+          });
+          updateSelUI();
+        } else if (groupBtn.dataset.groupAction === 'all') {
+          g.items.forEach(i => selected.add(i.newRel));
+          updateSelUI();
+        }
+        filter();
+        return;
+      }
+
       const actionBtn = e.target.closest('[data-action]');
       const card = e.target.closest('[data-rel]');
       if (!card) return;
@@ -1009,6 +1394,20 @@
     document.getElementById('patToggle').onclick = () => {
       document.getElementById('patRow').classList.toggle('hidden');
     };
+
+    document.getElementById('mediaContainer').addEventListener('input', e => {
+      if (e.target.id !== 'similarThreshold') return;
+      similarThreshold = +e.target.value;
+      const val = document.getElementById('thresholdVal');
+      if (val) val.textContent = String(similarThreshold);
+    });
+
+    document.getElementById('mediaContainer').addEventListener('change', e => {
+      if (e.target.id !== 'similarThreshold') return;
+      similarScanned = false;
+      autoSmartSelected = false;
+      scanSimilarImages(true);
+    });
 
     document.getElementById('replaceInput').onchange = async () => {
       const input = document.getElementById('replaceInput');

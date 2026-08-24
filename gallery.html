@@ -453,6 +453,124 @@
       background: var(--bg-panel);
     }
 
+    /* Duplicate / similar groups */
+    .dup-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      padding: 12px 14px;
+      margin-bottom: 14px;
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+    .dup-toolbar .hint {
+      flex: 1;
+      min-width: 200px;
+      font-size: 0.82rem;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .dup-toolbar button {
+      font-size: 0.82rem;
+      padding: 7px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--bg-panel);
+      cursor: pointer;
+    }
+    .dup-toolbar button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    .dup-toolbar label {
+      font-size: 0.78rem;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .dup-toolbar input[type=range] { width: 100px; accent-color: var(--accent); }
+
+    .dup-group {
+      margin-bottom: 22px;
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+    }
+    .dup-group-head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      padding: 12px 14px;
+      background: var(--bg-hover);
+      border-bottom: 1px solid var(--line);
+    }
+    .dup-group-title {
+      font-size: 0.86rem;
+      font-weight: 600;
+      flex: 1;
+      min-width: 160px;
+    }
+    .dup-group-title .sub {
+      font-weight: 400;
+      color: var(--muted);
+      font-size: 0.78rem;
+      margin-left: 6px;
+    }
+    .dup-group-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .dup-group-actions button {
+      font-size: 0.75rem;
+      padding: 5px 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--bg-panel);
+      cursor: pointer;
+    }
+    .dup-group-actions button:hover { background: var(--bg-active); }
+    .dup-group-grid {
+      padding: 14px;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    }
+    .card.keep { border-color: rgba(5, 150, 105, 0.45); }
+    .keep-badge {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      z-index: 5;
+      font-size: 0.62rem;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 5px;
+      background: rgba(5, 150, 105, 0.92);
+      color: #fff;
+      letter-spacing: 0.03em;
+    }
+    .card.selected:not(.keep) { border-color: var(--danger); box-shadow: 0 0 0 2px var(--danger-dim); }
+    .scan-progress {
+      padding: 40px 20px;
+      text-align: center;
+      color: var(--muted);
+    }
+    .scan-progress .bar {
+      height: 6px;
+      background: var(--line);
+      border-radius: 999px;
+      margin: 16px auto;
+      max-width: 320px;
+      overflow: hidden;
+    }
+    .scan-progress .bar-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 999px;
+      transition: width .2s;
+    }
+
     /* Detail panel — ImageKit DAM metadata */
     .detail-panel {
       display: none;
@@ -697,6 +815,7 @@
         <button type="button" class="nav-item" data-cat="other"><span class="icon">📦</span>其他 <span class="count" id="cntOther">0</span></button>
         <div class="nav-section">工具</div>
         <button type="button" class="nav-item" data-cat="dup"><span class="icon">⚠</span>重复 <span class="count" id="dupCount">0</span></button>
+        <button type="button" class="nav-item" data-cat="similar"><span class="icon">◎</span>相似 <span class="count" id="similarCount">0</span></button>
       </nav>
       <div class="sidebar-foot">
         <div class="auth-block" id="authPanel">
