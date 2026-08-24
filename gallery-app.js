@@ -658,9 +658,12 @@
 
   function srcOf(item) {
     const source = document.getElementById('source');
-    if (source.value === 'raw') return item.raw;
-    if (source.value === 'local') return 'images/' + item.name;
-    return item.cdn;
+    let url;
+    if (source.value === 'raw') url = item.raw;
+    else if (source.value === 'local') url = 'images/' + item.name;
+    else url = item.cdn;
+    if (item.rev) url += (url.includes('?') ? '&' : '?') + 'v=' + item.rev;
+    return url;
   }
 
   function escapeHtml(s) {
@@ -1153,7 +1156,6 @@
   }
 
   async function replaceFile(rel, file) {
-    const meta = await getFileMeta(rel);
     const buf = await file.arrayBuffer();
     const bytes = new Uint8Array(buf);
     let binary = '';
@@ -1162,11 +1164,30 @@
       binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
     }
     const content = btoa(binary);
-    await putFile(rel, content, meta.sha, 'gallery: replace ' + rel);
+
+    let meta = await getFileMeta(rel);
+    let result;
+    try {
+      result = await putFile(rel, content, meta.sha, 'gallery: replace ' + rel);
+    } catch (e) {
+      if (!/does not match|409/i.test(e.message)) throw e;
+      await sleep(1000);
+      meta = await getFileMeta(rel);
+      result = await putFile(rel, content, meta.sha, 'gallery: replace ' + rel);
+    }
+
+    const newSha = result && result.content && result.content.sha;
     const name = rel.slice(7);
     const idx = ITEMS.findIndex(i => i.newRel === rel);
-    if (idx >= 0) ITEMS[idx] = buildItem(name, ITEMS[idx].oldRel);
+    if (idx >= 0) {
+      const oldRel = ITEMS[idx].oldRel;
+      ITEMS[idx] = buildItem(name, oldRel);
+      ITEMS[idx].sha = newSha || meta.sha;
+      ITEMS[idx].rev = Date.now();
+    }
+    phashCache.delete(rel);
     rebuildDupIndex();
+    return ITEMS[idx];
   }
 
   async function deleteOne(rel) {
@@ -1417,9 +1438,12 @@
       if (!file || !rel) return;
       setStatus('替换上传中…');
       try {
-        await replaceFile(rel, file);
+        const updated = await replaceFile(rel, file);
         filter();
-        if (detailItem && detailItem.newRel === rel) openDetail(itemByRel(rel));
+        if (updated) {
+          detailItem = updated;
+          openDetail(updated);
+        }
         setStatus('替换成功', 'ok');
       } catch (e) {
         setStatus('替换失败: ' + e.message, 'err');

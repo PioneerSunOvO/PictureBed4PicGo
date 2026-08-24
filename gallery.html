@@ -683,27 +683,51 @@
       backdrop-filter: blur(8px);
       align-items: center;
       justify-content: center;
+      padding: 20px;
     }
     .lightbox.open { display: flex; }
-    .lightbox-content {
-      max-width: min(92vw, 1200px);
-      max-height: 88vh;
+    .lightbox-inner {
       display: flex;
       flex-direction: column;
       align-items: center;
+      justify-content: center;
+      max-width: 96vw;
+      max-height: 96vh;
+      min-width: 0;
     }
-    .lightbox-content img,
-    .lightbox-content video,
-    .lightbox-content audio,
-    .lightbox-content iframe {
-      max-width: 100%;
-      max-height: 80vh;
+    .lightbox-media {
+      flex: 1 1 auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 0;
+      max-height: calc(96vh - 44px);
+      width: 100%;
+    }
+    .lightbox-media img,
+    .lightbox-media video {
+      display: block;
+      max-width: 96vw;
+      max-height: calc(96vh - 44px);
+      width: auto;
+      height: auto;
+      object-fit: contain;
+      border-radius: 8px;
+      box-shadow: var(--shadow-lg);
+    }
+    .lightbox-media audio {
+      width: min(92vw, 480px);
+    }
+    .lightbox-media iframe {
+      width: min(92vw, 900px);
+      height: min(75vh, calc(96vh - 44px));
+      border: none;
       border-radius: 8px;
       box-shadow: var(--shadow-lg);
     }
     .lightbox-text {
       width: min(92vw, 800px);
-      max-height: 70vh;
+      max-height: calc(96vh - 44px);
       overflow: auto;
       background: #1e293b;
       color: #e2e8f0;
@@ -749,13 +773,16 @@
     }
     .lightbox-close:hover { background: rgba(255,255,255,.22); }
     .lightbox-caption {
-      margin-top: 12px;
-      color: rgba(255,255,255,.75);
+      flex-shrink: 0;
+      margin-top: 10px;
+      padding: 0 8px;
+      color: rgba(255,255,255,.8);
       font-size: 0.82rem;
       font-family: var(--mono);
       text-align: center;
-      max-width: 90vw;
+      max-width: 96vw;
       word-break: break-all;
+      line-height: 1.4;
     }
 
     .hidden { display: none !important; }
@@ -897,8 +924,10 @@
     <button type="button" class="lightbox-close" id="lightboxClose">&times;</button>
     <button type="button" class="lightbox-nav prev" id="lightboxPrev">‹</button>
     <button type="button" class="lightbox-nav next" id="lightboxNext">›</button>
-    <div class="lightbox-content" id="lightboxContent"></div>
-    <div class="lightbox-caption" id="lightboxCaption"></div>
+    <div class="lightbox-inner">
+      <div class="lightbox-media" id="lightboxContent"></div>
+      <div class="lightbox-caption" id="lightboxCaption"></div>
+    </div>
   </div>
 
   <input type="file" id="replaceInput" accept="*/*">
