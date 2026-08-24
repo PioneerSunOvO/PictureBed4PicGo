@@ -9,12 +9,16 @@
   <meta property="og:title" content="PictureBed — GitHub 图床">
   <meta property="og:description" content="GitHub 图床画廊 · 自动同步 · 重复与相似检测">
   <meta property="og:url" content="https://pioneersunovo.github.io/PictureBed4PicGo/gallery.html">
-  <meta property="og:image" id="ogImage" content="https://github.com/PioneerSunOvO.png?size=512">
+  <meta property="og:image" id="ogImage" content="https://pioneersunovo.github.io/PictureBed4PicGo/assets/og-image.png">
+  <meta property="og:image:width" content="512">
+  <meta property="og:image:height" content="512">
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="PictureBed — GitHub 图床">
-  <meta name="twitter:image" id="twitterImage" content="https://github.com/PioneerSunOvO.png?size=512">
-  <link rel="icon" type="image/png" id="siteFavicon" href="https://github.com/PioneerSunOvO.png?size=32">
-  <link rel="apple-touch-icon" id="appleTouchIcon" href="https://github.com/PioneerSunOvO.png?size=180">
+  <meta name="twitter:image" id="twitterImage" content="https://pioneersunovo.github.io/PictureBed4PicGo/assets/og-image.png">
+  <meta name="theme-color" content="#4f6ef7">
+  <link rel="icon" type="image/png" id="siteFavicon" href="assets/favicon.png">
+  <link rel="apple-touch-icon" id="appleTouchIcon" href="assets/apple-touch-icon.png">
+  <link rel="manifest" href="site.webmanifest">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -155,32 +159,36 @@
     }
     .nav-item.active .count { color: var(--accent); background: var(--accent-dim); }
     .sidebar-foot {
-      padding: 10px;
+      padding: 10px 10px 12px;
       border-top: 1px solid var(--line);
-      background: linear-gradient(180deg, transparent, rgba(255,255,255,.45));
+      background: var(--bg-sidebar);
     }
-    .auth-block { display: flex; flex-direction: column; gap: 8px; }
-    .user-card {
+    .auth-block { display: flex; flex-direction: column; gap: 0; }
+    .account-panel {
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: var(--shadow-sm);
+    }
+    .account-head {
       display: flex;
       align-items: center;
       gap: 10px;
-      padding: 8px 10px;
-      background: var(--bg-panel);
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      box-shadow: var(--shadow-sm);
+      padding: 10px 10px 8px;
     }
-    .user-card .user-avatar {
-      width: 32px;
-      height: 32px;
+    .account-avatar {
+      width: 34px;
+      height: 34px;
       border-radius: 50%;
       object-fit: cover;
       flex-shrink: 0;
-      border: 1px solid var(--line);
+      border: 2px solid var(--bg-panel);
+      box-shadow: 0 0 0 1px var(--line);
       background: var(--bg-thumb);
     }
-    .user-card .user-meta { min-width: 0; flex: 1; }
-    .user-card .user-name {
+    .account-meta { min-width: 0; flex: 1; }
+    .account-name {
       display: block;
       font-size: 0.82rem;
       font-weight: 600;
@@ -188,19 +196,53 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      line-height: 1.25;
     }
-    .user-card .user-hint {
+    .account-sub {
       display: block;
       font-size: 0.68rem;
       color: var(--muted);
-      margin-top: 1px;
+      margin-top: 2px;
     }
-    .foot-actions {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
+    .account-logout {
+      flex-shrink: 0;
+      width: 30px;
+      height: 30px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: none;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+    .account-logout:hover {
+      background: var(--danger-dim);
+      color: var(--danger);
+    }
+    .account-logout svg { width: 16px; height: 16px; }
+    .account-sync {
+      display: flex;
+      align-items: center;
+      justify-content: center;
       gap: 6px;
+      width: 100%;
+      padding: 8px 10px;
+      border: none;
+      border-top: 1px solid var(--line);
+      background: var(--bg-hover);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 0.78rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background .15s;
     }
-    .foot-actions.single { grid-template-columns: 1fr; }
+    .account-sync:hover { background: var(--bg-active); }
+    .account-sync .ico { font-size: 0.9rem; opacity: 0.75; }
+    .login-panel { display: flex; flex-direction: column; gap: 8px; }
     .foot-btn {
       display: inline-flex;
       align-items: center;
@@ -937,7 +979,7 @@
   <div class="app" id="appShell">
     <aside class="sidebar">
       <div class="brand">
-        <img class="brand-avatar" id="brandAvatar" src="https://github.com/PioneerSunOvO.png?size=72" alt="PictureBed">
+        <img class="brand-avatar" id="brandAvatar" src="assets/apple-touch-icon.png" alt="PictureBed">
         <div class="brand-text">
           <h1>PictureBed</h1>
           <p>GitHub 图床 · 自动同步</p>
@@ -958,29 +1000,31 @@
       </nav>
       <div class="sidebar-foot">
         <div class="auth-block" id="authPanel">
-          <div id="loginRow">
+          <div id="loginRow" class="login-panel">
             <button type="button" id="githubLogin" class="btn-github">
               <svg class="gh-mark" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
               GitHub 登录
             </button>
-            <div class="foot-actions single">
-              <button type="button" id="refreshList" class="foot-btn"><span class="ico">↻</span>同步图库</button>
-            </div>
+            <button type="button" id="refreshList" class="account-sync" style="border:1px solid var(--line);border-radius:10px;">
+              <span class="ico">↻</span> 同步图库
+            </button>
             <p class="auth-hint" id="patStatus">登录后可删除、重命名与替换</p>
             <button type="button" id="patToggle" class="pat-toggle">手动 PAT ▾</button>
           </div>
-          <div class="hidden" id="loggedRow">
-            <div class="user-card">
-              <img class="user-avatar" id="authAvatar" src="https://github.com/PioneerSunOvO.png?size=64" alt="">
-              <div class="user-meta">
-                <span class="user-name" id="authUser">@user</span>
-                <span class="user-hint">GitHub 已连接</span>
+          <div class="hidden account-panel" id="loggedRow">
+            <div class="account-head">
+              <img class="account-avatar" id="authAvatar" src="assets/apple-touch-icon.png" alt="">
+              <div class="account-meta">
+                <span class="account-name" id="authUser">@user</span>
+                <span class="account-sub">GitHub 已连接</span>
               </div>
+              <button type="button" id="githubLogout" class="account-logout" title="退出登录" aria-label="退出登录">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+              </button>
             </div>
-            <div class="foot-actions">
-              <button type="button" id="refreshListLogged" class="foot-btn"><span class="ico">↻</span>同步</button>
-              <button type="button" id="githubLogout" class="foot-btn foot-btn-muted"><span class="ico">⎋</span>退出</button>
-            </div>
+            <button type="button" id="refreshListLogged" class="account-sync">
+              <span class="ico">↻</span> 同步图库
+            </button>
           </div>
           <div class="hidden" id="patRow">
             <input type="password" id="pat" placeholder="PAT（repo 权限）" autocomplete="off">

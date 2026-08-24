@@ -5,6 +5,9 @@
   const TOKEN_KEY = 'pb4pg_pat';
   const AUTH_USER_KEY = 'pb4pg_user';
   const AUTH_AVATAR_KEY = 'pb4pg_avatar';
+  const SITE_OG_IMAGE = 'https://pioneersunovo.github.io/PictureBed4PicGo/assets/og-image.png';
+  const SITE_FAVICON = 'assets/favicon.png';
+  const SITE_APPLE_ICON = 'assets/apple-touch-icon.png';
   const OAUTH_STATE_KEY = 'pb4pg_oauth_state';
   const OAUTH_VERIFIER_KEY = 'pb4pg_code_verifier';
   const OAUTH_SECRET_KEY = 'pb4pg_oauth_secret';
@@ -93,10 +96,10 @@
   }
 
   function updateSiteBranding(avatarUrl, login) {
-    const url32 = sizedAvatar(avatarUrl, login, 32);
-    const url64 = sizedAvatar(avatarUrl, login, 64);
-    const url180 = sizedAvatar(avatarUrl, login, 180);
-    const url512 = sizedAvatar(avatarUrl, login, 512);
+    const useRemote = !!(avatarUrl && avatarUrl.includes('avatars.githubusercontent.com'));
+    const url32 = useRemote ? sizedAvatar(avatarUrl, login, 32) : SITE_FAVICON;
+    const url64 = useRemote ? sizedAvatar(avatarUrl, login, 64) : SITE_APPLE_ICON;
+    const url180 = useRemote ? sizedAvatar(avatarUrl, login, 180) : SITE_APPLE_ICON;
     const fav = document.getElementById('siteFavicon');
     const apple = document.getElementById('appleTouchIcon');
     const og = document.getElementById('ogImage');
@@ -105,8 +108,8 @@
     const authAv = document.getElementById('authAvatar');
     if (fav) fav.href = url32;
     if (apple) apple.href = url180;
-    if (og) og.content = url512;
-    if (tw) tw.content = url512;
+    if (og) og.content = SITE_OG_IMAGE;
+    if (tw) tw.content = SITE_OG_IMAGE;
     if (brand) brand.src = url64;
     if (authAv) authAv.src = url64;
   }
@@ -1551,7 +1554,7 @@
       if (loginRow) loginRow.classList.add('hidden');
       if (loggedRow) loggedRow.classList.remove('hidden');
       if (userLabel) userLabel.textContent = user ? '@' + user : '已授权';
-      if (authAvatar) authAvatar.src = avatar || githubAvatarUrl(user, 64);
+      if (authAvatar) authAvatar.src = avatar || SITE_APPLE_ICON;
       updateSiteBranding(avatar, user || REPO.owner);
       if (st) st.textContent = '';
       if (patRow) patRow.classList.add('hidden');
