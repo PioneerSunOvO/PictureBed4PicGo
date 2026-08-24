@@ -4,6 +4,7 @@
 
   const TOKEN_KEY = 'pb4pg_pat';
   const AUTH_USER_KEY = 'pb4pg_user';
+  const AUTH_AVATAR_KEY = 'pb4pg_avatar';
   const OAUTH_STATE_KEY = 'pb4pg_oauth_state';
   const OAUTH_VERIFIER_KEY = 'pb4pg_code_verifier';
   const OAUTH_SECRET_KEY = 'pb4pg_oauth_secret';
@@ -37,12 +38,13 @@
   const hashGroups = new Map();
   let exactSets = [];
   let similarSets = [];
-  const phashCache = new Map();
+  let clipModule = null;
   let similarScanned = false;
   let similarScanning = false;
   let autoSmartSelected = false;
-  let similarThreshold = 8;
-  const PHASH_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']);
+  /** CLIP cosine similarity threshold (0.85–0.99). Immich-style near-duplicate ≈ 0.95+. */
+  let similarThreshold = 0.95;
+  const CLIP_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']);
   /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
   let repoHeadCommit = null;
 
@@ -76,6 +78,54 @@
    * 5. Unix 秒/毫秒时间戳
    * Fallback sources: 当前文件名 → 旧路径 → rename-mapping 关联名 → Git 提交时间
    */
+  function githubAvatarUrl(login, size) {
+    const name = login || REPO.owner;
+    return 'https://github.com/' + encodeURIComponent(name) + '.png?size=' + (size || 96);
+  }
+
+  function sizedAvatar(avatarUrl, login, size) {
+    if (avatarUrl && avatarUrl.includes('avatars.githubusercontent.com')) {
+      const sep = avatarUrl.includes('?') ? '&' : '?';
+      return avatarUrl + sep + 's=' + size;
+    }
+    if (avatarUrl) return avatarUrl;
+    return githubAvatarUrl(login, size);
+  }
+
+  function updateSiteBranding(avatarUrl, login) {
+    const url32 = sizedAvatar(avatarUrl, login, 32);
+    const url64 = sizedAvatar(avatarUrl, login, 64);
+    const url180 = sizedAvatar(avatarUrl, login, 180);
+    const url512 = sizedAvatar(avatarUrl, login, 512);
+    const fav = document.getElementById('siteFavicon');
+    const apple = document.getElementById('appleTouchIcon');
+    const og = document.getElementById('ogImage');
+    const tw = document.getElementById('twitterImage');
+    const brand = document.getElementById('brandAvatar');
+    const authAv = document.getElementById('authAvatar');
+    if (fav) fav.href = url32;
+    if (apple) apple.href = url180;
+    if (og) og.content = url512;
+    if (tw) tw.content = url512;
+    if (brand) brand.src = url64;
+    if (authAv) authAv.src = url64;
+  }
+
+  async function refreshUserProfile() {
+    const t = token();
+    if (!t) return;
+    try {
+      const res = await fetch('https://api.github.com/user', {
+        headers: { Authorization: 'Bearer ' + t, Accept: 'application/vnd.github+json' }
+      });
+      if (!res.ok) return;
+      const u = await res.json();
+      if (u.login) sessionStorage.setItem(AUTH_USER_KEY, u.login);
+      if (u.avatar_url) sessionStorage.setItem(AUTH_AVATAR_KEY, u.avatar_url);
+      updateSiteBranding(u.avatar_url, u.login);
+    } catch (_) { /* ignore */ }
+  }
+
   const DATE_PARSERS = [
     {
       name: 'PicGo 紧凑时间戳',
@@ -290,11 +340,15 @@
       if (res.ok) {
         const u = await res.json();
         sessionStorage.setItem(AUTH_USER_KEY, u.login || '');
+        if (u.avatar_url) sessionStorage.setItem(AUTH_AVATAR_KEY, u.avatar_url);
+        updateSiteBranding(u.avatar_url, u.login);
       } else {
         sessionStorage.removeItem(AUTH_USER_KEY);
+        sessionStorage.removeItem(AUTH_AVATAR_KEY);
       }
     } catch (_) {
       sessionStorage.removeItem(AUTH_USER_KEY);
+      sessionStorage.removeItem(AUTH_AVATAR_KEY);
     }
     showAuthUI();
     filter();
@@ -414,6 +468,7 @@
     if (devicePollAbort) devicePollAbort.aborted = true;
     sessionStorage.removeItem(TOKEN_KEY);
     sessionStorage.removeItem(AUTH_USER_KEY);
+    sessionStorage.removeItem(AUTH_AVATAR_KEY);
     sessionStorage.removeItem(OAUTH_STATE_KEY);
     sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
     selected.clear();
@@ -421,6 +476,7 @@
     closeDetail();
     const pat = document.getElementById('pat');
     if (pat) pat.value = '';
+    updateSiteBranding(null, REPO.owner);
     showAuthUI();
     filter();
     setStatus('已退出', 'ok');
@@ -442,58 +498,13 @@
     return m ? m[1].toLowerCase() : '';
   }
 
-  function canPhash(item) {
-    return item.kind === 'image' && PHASH_EXTS.has(item.ext);
+  function canClipEmbed(item) {
+    return item.kind === 'image' && CLIP_EXTS.has(item.ext);
   }
 
-  function hammingDistance(a, b) {
-    if (!a || !b || a.length !== b.length) return 64;
-    let d = 0;
-    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d++;
-    return d;
-  }
-
-  function loadImage(url) {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => resolve(img);
-      img.onerror = () => reject(new Error('load failed'));
-      img.src = url;
-    });
-  }
-
-  async function computeDHash(item) {
-    if (phashCache.has(item.newRel)) return phashCache.get(item.newRel);
-    const urls = [item.raw, item.cdn];
-    let lastErr;
-    for (const url of urls) {
-      try {
-        const img = await loadImage(url);
-        const canvas = document.createElement('canvas');
-        canvas.width = 9;
-        canvas.height = 8;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, 9, 8);
-        const px = ctx.getImageData(0, 0, 9, 8).data;
-        let hash = '';
-        for (let y = 0; y < 8; y++) {
-          for (let x = 0; x < 8; x++) {
-            const i1 = (y * 9 + x) * 4;
-            const i2 = (y * 9 + x + 1) * 4;
-            const g1 = 0.299 * px[i1] + 0.587 * px[i1 + 1] + 0.114 * px[i1 + 2];
-            const g2 = 0.299 * px[i2] + 0.587 * px[i2 + 1] + 0.114 * px[i2 + 2];
-            hash += g1 > g2 ? '1' : '0';
-          }
-        }
-        phashCache.set(item.newRel, hash);
-        item.phash = hash;
-        return hash;
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-    throw lastErr || new Error('无法计算感知哈希');
+  async function getClipModule() {
+    if (!clipModule) clipModule = await import('./clip-embed.js');
+    return clipModule;
   }
 
   function sortItemsByDate(items) {
@@ -532,7 +543,14 @@
     return hashes.size === 1 && items.every(i => i.hash);
   }
 
-  function clusterByPhash(items, threshold) {
+  function cosineSimilarity(a, b) {
+    if (!a || !b || a.length !== b.length) return 0;
+    let dot = 0;
+    for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+    return dot;
+  }
+
+  function clusterByEmbedding(items, minSimilarity) {
     const n = items.length;
     const parent = items.map((_, i) => i);
     function find(x) {
@@ -549,7 +567,7 @@
     }
     for (let i = 0; i < n; i++) {
       for (let j = i + 1; j < n; j++) {
-        if (hammingDistance(items[i].phash, items[j].phash) <= threshold) unite(i, j);
+        if (cosineSimilarity(items[i].embedding, items[j].embedding) >= minSimilarity) unite(i, j);
       }
     }
     const buckets = new Map();
@@ -562,20 +580,20 @@
   }
 
   function buildSimilarSets() {
-    const images = ITEMS.filter(canPhash).filter(i => i.phash);
-    const clusters = clusterByPhash(images, similarThreshold);
+    const images = ITEMS.filter(canClipEmbed).filter(i => i.embedding);
+    const clusters = clusterByEmbedding(images, similarThreshold);
     similarSets = clusters
       .filter(g => !isExactOnlyGroup(g))
       .map((items, idx) => {
         const sorted = sortItemsByDate(items);
         const keep = sorted[sorted.length - 1];
-        const avgDist = computeGroupAvgDistance(sorted);
+        const avgSim = computeGroupAvgSimilarity(sorted);
         return {
           id: 'sim-' + idx,
           type: 'similar',
           items: sorted,
           keepRel: keep.newRel,
-          avgDistance: avgDist
+          avgSimilarity: avgSim
         };
       })
       .sort((a, b) => b.items.length - a.items.length);
@@ -583,16 +601,16 @@
     if (el) el.textContent = String(similarSets.length);
   }
 
-  function computeGroupAvgDistance(items) {
+  function computeGroupAvgSimilarity(items) {
     let sum = 0;
     let cnt = 0;
     for (let i = 0; i < items.length; i++) {
       for (let j = i + 1; j < items.length; j++) {
-        sum += hammingDistance(items[i].phash, items[j].phash);
+        sum += cosineSimilarity(items[i].embedding, items[j].embedding);
         cnt++;
       }
     }
-    return cnt ? Math.round(sum / cnt) : 0;
+    return cnt ? sum / cnt : 0;
   }
 
   async function scanSimilarImages(force) {
@@ -601,7 +619,7 @@
     similarScanning = true;
     similarScanned = false;
     similarSets = [];
-    const targets = ITEMS.filter(canPhash);
+    const targets = ITEMS.filter(canClipEmbed);
     const total = targets.length;
     if (!total) {
       similarScanning = false;
@@ -611,33 +629,60 @@
       return;
     }
     let done = 0;
+    let cacheHits = 0;
+    let phase = 'model';
+    let phaseLabel = '正在加载 CLIP 模型（首次约 150MB，之后浏览器缓存）…';
     const updateProgress = () => {
-      const pct = Math.round((done / total) * 100);
+      const pct = phase === 'model' ? 0 : Math.round((done / total) * 100);
       const container = document.getElementById('mediaContainer');
       if (container && category === 'similar') {
         container.innerHTML =
           '<div class="scan-progress">' +
-          '<div>正在分析相似图片（感知哈希 dHash）…</div>' +
+          '<div>' + escapeHtml(phaseLabel) + '</div>' +
           '<div class="bar"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
-          '<div>' + done + ' / ' + total + '</div></div>';
+          (phase === 'encode'
+            ? '<div>' + done + ' / ' + total + ' · 缓存命中 ' + cacheHits + '</div>'
+            : '<div>请稍候…</div>') +
+          '</div>';
       }
-      setStatus('相似分析 ' + done + '/' + total + '…');
+      if (phase === 'encode') setStatus('CLIP 分析 ' + done + '/' + total + '…');
     };
     updateProgress();
-    for (const item of targets) {
-      try {
-        await computeDHash(item);
-      } catch (_) {
-        /* skip unreadable images */
+    try {
+      const clip = await getClipModule();
+      await clip.ensureClip((data) => {
+        phaseLabel = clip.formatLoadProgress(data);
+        updateProgress();
+      });
+      phase = 'encode';
+      phaseLabel = '正在提取 CLIP 向量（IndexedDB 缓存加速）…';
+      updateProgress();
+      for (const item of targets) {
+        try {
+          const key = clip.cacheKeyFor(item, repoHeadCommit);
+          const { vec, fromCache } = await clip.getEmbedding(
+            item, [item.raw, item.cdn], key, null
+          );
+          item.embedding = vec;
+          item.embeddingKey = key;
+          if (fromCache) cacheHits++;
+        } catch (_) {
+          /* skip unreadable images */
+        }
+        done++;
+        if (done % 2 === 0 || done === total) updateProgress();
       }
-      done++;
-      if (done % 3 === 0 || done === total) updateProgress();
+      buildSimilarSets();
+      setStatus(
+        '相似分析完成：' + similarSets.length + ' 组（缓存命中 ' + cacheHits + '/' + total + '）',
+        'ok'
+      );
+    } catch (e) {
+      setStatus('CLIP 分析失败: ' + e.message, 'err');
     }
-    buildSimilarSets();
     similarScanning = false;
     similarScanned = true;
     autoSmartSelected = false;
-    setStatus('相似分析完成：' + similarSets.length + ' 组', 'ok');
     filter();
   }
 
@@ -762,8 +807,8 @@
     const data = await ghFetch('/git/trees/' + REPO.branch + '?recursive=1');
     return (data.tree || [])
       .filter(t => t.type === 'blob' && t.path.startsWith('images/'))
-      .map(t => t.path)
-      .sort();
+      .map(t => ({ path: t.path, sha: t.sha }))
+      .sort((a, b) => a.path.localeCompare(b.path));
   }
 
   async function fetchOldMapFromRemote() {
@@ -961,8 +1006,8 @@
       html += '<input type="checkbox" class="card-check"' + (sel ? ' checked' : '') + '>';
     }
     if (isDup && !isKeep) html += '<span class="badge">重复 ×' + item.dupCount + '</span>';
-    if (group.type === 'similar' && item.phash) {
-      html += '<span class="badge" style="border-color:rgba(79,110,247,.3);color:var(--accent)" title="感知哈希">相似</span>';
+    if (group.type === 'similar' && item.embedding) {
+      html += '<span class="badge" style="border-color:rgba(79,110,247,.3);color:var(--accent)" title="CLIP 相似">相似</span>';
     }
     if (item.kind !== 'image') html += '<span class="type-badge">' + escapeHtml(item.ext) + '</span>';
     html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
@@ -984,13 +1029,15 @@
     if (mode === 'exact') {
       html += '按文件名 hash 精确分组。已<strong>智能选中较旧副本</strong>，每组保留最新一张。';
     } else {
-      html += '按感知哈希（dHash）检测视觉相似图，阈值 ' + similarThreshold + '。已智能选中较旧副本。';
+      html += 'CLIP 语义向量检测视觉相似图，阈值 ' + Math.round(similarThreshold * 100) + '%。已智能选中较旧副本。';
     }
     html += '</div>';
     html += '<button type="button" class="primary" data-dup-action="smart-select">智能选中待删</button>';
     html += '<button type="button" data-dup-action="clear-select">取消选中</button>';
     if (mode === 'similar') {
-      html += '<label>相似度 <input type="range" id="similarThreshold" min="3" max="15" value="' + similarThreshold + '"> <span id="thresholdVal">' + similarThreshold + '</span></label>';
+      html += '<label>相似度 <input type="range" id="similarThreshold" min="85" max="99" value="' +
+        Math.round(similarThreshold * 100) + '"> <span id="thresholdVal">' +
+        Math.round(similarThreshold * 100) + '</span>%</label>';
       html += '<button type="button" data-dup-action="rescan">重新扫描</button>';
     }
     html += '</div>';
@@ -1007,7 +1054,7 @@
       html += '<div class="dup-group-head">';
       html += '<div class="dup-group-title">组 ' + (gi + 1) + ' · ' + group.items.length + ' 张';
       if (mode === 'exact') html += '<span class="sub">hash 相同</span>';
-      else html += '<span class="sub">平均距离 ' + (group.avgDistance || 0) + '</span>';
+      else html += '<span class="sub">平均相似度 ' + Math.round((group.avgSimilarity || 0) * 100) + '%</span>';
       if (keepDate) html += '<span class="sub">保留 ' + escapeHtml(keepDate) + '</span>';
       html += '</div>';
       html += '<div class="dup-group-actions">';
@@ -1351,13 +1398,18 @@
       const paths = await fetchRemotePaths();
       const prevMeta = new Map(ITEMS.map(i => [i.newRel, i]));
       ITEMS = paths.map(p => {
-        const item = buildItem(p.slice(7), OLD_MAP[p]);
+        const item = buildItem(p.path.slice(7), OLD_MAP[p.path]);
+        item.blobSha = p.sha;
         const old = prevMeta.get(item.newRel);
         if (old && old.rev) item.rev = old.rev;
+        if (old && old.embedding && old.blobSha === p.sha) {
+          item.embedding = old.embedding;
+          item.embeddingKey = old.embeddingKey;
+        }
         return item;
       });
       await enrichDatesFromGit(ITEMS);
-      phashCache.clear();
+      if (clipModule) clipModule.clearMemCache();
       similarScanned = false;
       autoSmartSelected = false;
       rebuildDupIndex();
@@ -1417,13 +1469,14 @@
     const idx = ITEMS.findIndex(i => i.newRel === rel);
     if (idx >= 0) {
       const oldRel = ITEMS[idx].oldRel;
+      const oldKey = ITEMS[idx].embeddingKey;
       ITEMS[idx] = buildItem(name, oldRel);
       ITEMS[idx].blobSha = newSha;
       ITEMS[idx].commitSha = commitSha;
       ITEMS[idx].rev = Date.now();
       ITEMS[idx].size = file.size;
+      if (oldKey) getClipModule().then(m => m.invalidateCache(oldKey)).catch(() => {});
     }
-    phashCache.delete(rel);
     rebuildDupIndex();
     return ITEMS[idx];
   }
@@ -1484,27 +1537,34 @@
   function showAuthUI() {
     const loggedIn = !!token();
     const user = sessionStorage.getItem(AUTH_USER_KEY);
+    const avatar = sessionStorage.getItem(AUTH_AVATAR_KEY);
     const manageBar = document.getElementById('manageBar');
     const loginRow = document.getElementById('loginRow');
     const loggedRow = document.getElementById('loggedRow');
     const patRow = document.getElementById('patRow');
     const st = document.getElementById('patStatus');
     const userLabel = document.getElementById('authUser');
+    const authAvatar = document.getElementById('authAvatar');
 
     if (loggedIn) {
       if (manageBar) { manageBar.classList.remove('hidden'); manageBar.style.display = 'flex'; }
       if (loginRow) loginRow.classList.add('hidden');
       if (loggedRow) loggedRow.classList.remove('hidden');
       if (userLabel) userLabel.textContent = user ? '@' + user : '已授权';
+      if (authAvatar) authAvatar.src = avatar || githubAvatarUrl(user, 64);
+      updateSiteBranding(avatar, user || REPO.owner);
       if (st) st.textContent = '';
       if (patRow) patRow.classList.add('hidden');
     } else {
       if (manageBar) manageBar.classList.add('hidden');
       if (loginRow) loginRow.classList.remove('hidden');
       if (loggedRow) loggedRow.classList.add('hidden');
-      if (st) st.textContent = oauthClientId()
-        ? '已登录 GitHub 时一键授权'
-        : '首次登录自动注册应用';
+      updateSiteBranding(null, REPO.owner);
+      if (st) {
+        st.textContent = oauthClientId()
+          ? '已登录 GitHub 时一键授权'
+          : '登录后可删除、重命名与替换';
+      }
     }
   }
 
@@ -1668,16 +1728,22 @@
 
     document.getElementById('mediaContainer').addEventListener('input', e => {
       if (e.target.id !== 'similarThreshold') return;
-      similarThreshold = +e.target.value;
+      similarThreshold = +e.target.value / 100;
       const val = document.getElementById('thresholdVal');
-      if (val) val.textContent = String(similarThreshold);
+      if (val) val.textContent = String(+e.target.value);
     });
 
     document.getElementById('mediaContainer').addEventListener('change', e => {
       if (e.target.id !== 'similarThreshold') return;
-      similarScanned = false;
+      similarThreshold = +e.target.value / 100;
       autoSmartSelected = false;
-      scanSimilarImages(true);
+      if (ITEMS.some(i => i.embedding)) {
+        buildSimilarSets();
+        filter();
+      } else {
+        similarScanned = false;
+        scanSimilarImages(true);
+      }
     });
 
     document.getElementById('replaceInput').onchange = async () => {
@@ -1728,6 +1794,10 @@
 
     if (token() && !sessionStorage.getItem(AUTH_USER_KEY)) {
       try { await saveToken(token()); } catch (_) { /* ignore */ }
+    } else if (token()) {
+      refreshUserProfile();
+    } else {
+      updateSiteBranding(null, REPO.owner);
     }
 
     filter();
