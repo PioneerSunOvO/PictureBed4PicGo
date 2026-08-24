@@ -603,7 +603,7 @@
     const headers = { Accept: 'application/vnd.github+json', ...(opts.headers || {}) };
     const t = token();
     if (t) headers.Authorization = 'Bearer ' + t;
-    const res = await fetch(apiBase() + path, { ...opts, headers });
+    const res = await fetch(apiBase() + path, { ...opts, headers, cache: 'no-store' });
     if (!res.ok) {
       let detail = res.status + ' ' + res.statusText;
       try { const j = await res.json(); if (j.message) detail = j.message; } catch (_) { /* ignore */ }
@@ -635,7 +635,64 @@
   }
 
   async function getFileMeta(relPath) {
-    return ghFetch('/contents/' + encodePath(relPath) + '?ref=' + REPO.branch);
+    return ghFetch('/contents/' + encodePath(relPath) + '?ref=' + REPO.branch + '&_=' + Date.now());
+  }
+
+  async function fileToBase64(file) {
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }
+
+  /** Replace via Git Data API — always reads latest branch HEAD, avoids stale blob SHA. */
+  async function putFileViaGit(relPath, contentBase64, msg) {
+    let lastErr;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const refData = await ghFetch('/git/ref/heads/' + REPO.branch);
+        const baseCommitSha = refData.object.sha;
+        const commitData = await ghFetch('/git/commits/' + baseCommitSha);
+        const blob = await ghFetch('/git/blobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: contentBase64, encoding: 'base64' })
+        });
+        const tree = await ghFetch('/git/trees', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            base_tree: commitData.tree.sha,
+            tree: [{ path: relPath, mode: '100644', type: 'blob', sha: blob.sha }]
+          })
+        });
+        const commit = await ghFetch('/git/commits', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: msg || 'gallery: update ' + relPath,
+            tree: tree.sha,
+            parents: [baseCommitSha]
+          })
+        });
+        await ghFetch('/git/refs/heads/' + REPO.branch, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sha: commit.sha })
+        });
+        return { content: { sha: blob.sha }, commitSha: commit.sha };
+      } catch (e) {
+        lastErr = e;
+        const retry = /fast forward|409|422|does not match/i.test(e.message);
+        if (!retry || attempt === 4) throw e;
+        await sleep(600 * (attempt + 1));
+      }
+    }
+    throw lastErr;
   }
 
   async function deleteFile(relPath, sha, msg) {
@@ -1074,6 +1131,8 @@
   function closeLightbox() {
     document.getElementById('lightbox').classList.remove('open');
     document.getElementById('lightboxContent').innerHTML = '';
+    const cap = document.getElementById('lightboxCaption');
+    if (cap) cap.textContent = '';
     lightboxIdx = -1;
   }
 
@@ -1156,25 +1215,8 @@
   }
 
   async function replaceFile(rel, file) {
-    const buf = await file.arrayBuffer();
-    const bytes = new Uint8Array(buf);
-    let binary = '';
-    const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk) {
-      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-    }
-    const content = btoa(binary);
-
-    let meta = await getFileMeta(rel);
-    let result;
-    try {
-      result = await putFile(rel, content, meta.sha, 'gallery: replace ' + rel);
-    } catch (e) {
-      if (!/does not match|409/i.test(e.message)) throw e;
-      await sleep(1000);
-      meta = await getFileMeta(rel);
-      result = await putFile(rel, content, meta.sha, 'gallery: replace ' + rel);
-    }
+    const content = await fileToBase64(file);
+    const result = await putFileViaGit(rel, content, 'gallery: replace ' + rel);
 
     const newSha = result && result.content && result.content.sha;
     const name = rel.slice(7);
@@ -1182,7 +1224,7 @@
     if (idx >= 0) {
       const oldRel = ITEMS[idx].oldRel;
       ITEMS[idx] = buildItem(name, oldRel);
-      ITEMS[idx].sha = newSha || meta.sha;
+      ITEMS[idx].sha = newSha;
       ITEMS[idx].rev = Date.now();
     }
     phashCache.delete(rel);
