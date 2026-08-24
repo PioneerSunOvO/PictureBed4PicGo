@@ -8,7 +8,6 @@
   const OAUTH_VERIFIER_KEY = 'pb4pg_code_verifier';
   const OAUTH_SECRET_KEY = 'pb4pg_oauth_secret';
   const HASH_RE = /([a-f0-9]{32})(?:-\d+)?\.[^.]+$/i;
-  const DATE_RE = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/;
 
   const EXT_MAP = {
     image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'heic', 'heif'],
@@ -24,6 +23,8 @@
 
   let ITEMS = [];
   let OLD_MAP = {};
+  /** Bidirectional rename links for date recovery after manual rename. */
+  const RENAME_LINKS = new Map();
   let filtered = [];
   const selected = new Set();
   let focused = null;
@@ -58,11 +59,112 @@
     return 'other';
   }
 
+  function validDate(y, mo, d, h, mi, s) {
+    if (y < 1990 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    const dt = new Date(y, mo - 1, d, h || 0, mi || 0, s || 0);
+    if (isNaN(dt.getTime())) return null;
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+    return dt;
+  }
+
+  /**
+   * Supported date patterns (priority):
+   * 1. PicGo 紧凑时间戳 YYYYMMDDHHmmss[SSS]
+   * 2. 分隔日期时间 2026-08-12_02:13:56 / 2026年8月12日
+   * 3. 手机命名 IMG_/PXL_/Screenshot_…
+   * 4. 紧凑日期 YYYYMMDD
+   * 5. Unix 秒/毫秒时间戳
+   * Fallback sources: 当前文件名 → 旧路径 → rename-mapping 关联名 → Git 提交时间
+   */
+  const DATE_PARSERS = [
+    {
+      name: 'PicGo 紧凑时间戳',
+      re: /(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\d{0,3}(?!\d)/,
+      pick: m => validDate(+m[1], +m[2], +m[3], +m[4], +m[5], +m[6])
+    },
+    {
+      name: '分隔日期时间',
+      re: /(\d{4})[-_./年](\d{1,2})[-_./月](\d{1,2})日?(?:[Tt\s_-]+(\d{1,2})[:._-](\d{1,2})(?:[:._-](\d{1,2}))?)?/,
+      pick: m => validDate(+m[1], +m[2], +m[3], m[4] ? +m[4] : 0, m[5] ? +m[5] : 0, m[6] ? +m[6] : 0)
+    },
+    {
+      name: '手机命名',
+      re: /(?:IMG|PXL|VID|DSC|Screenshot|WX|MMEXPORT)[-_]?(\d{4})(\d{2})(\d{2})[-_]?(?:(\d{2})(\d{2})(\d{2}))?/i,
+      pick: m => validDate(+m[1], +m[2], +m[3], m[4] ? +m[4] : 0, m[5] ? +m[5] : 0, m[6] ? +m[6] : 0)
+    },
+    {
+      name: '紧凑日期',
+      re: /(?:^|[^\d])(\d{4})(\d{2})(\d{2})(?:[^\d]|$)/,
+      pick: m => validDate(+m[1], +m[2], +m[3])
+    },
+    {
+      name: 'Unix 时间戳',
+      re: /(?:^|[^\d])(1\d{9}|1\d{12})(?:[^\d]|$)/,
+      pick: m => {
+        const raw = m[1];
+        const ms = raw.length > 10 ? +raw : +raw * 1000;
+        const dt = new Date(ms);
+        return dt.getFullYear() >= 1990 && dt.getFullYear() <= 2100 ? dt : null;
+      }
+    }
+  ];
+
+  function parseDateFromString(str, sourceLabel) {
+    const s = String(str || '');
+    if (!s) return null;
+    for (let i = 0; i < DATE_PARSERS.length; i++) {
+      const p = DATE_PARSERS[i];
+      const m = s.match(p.re);
+      if (!m) continue;
+      const date = p.pick(m);
+      if (date) {
+        return {
+          date,
+          source: sourceLabel ? sourceLabel + ' · ' + p.name : p.name
+        };
+      }
+    }
+    return null;
+  }
+
+  function addRenameLink(a, b) {
+    if (!a || !b || a === b) return;
+    if (!RENAME_LINKS.has(a)) RENAME_LINKS.set(a, new Set());
+    if (!RENAME_LINKS.has(b)) RENAME_LINKS.set(b, new Set());
+    RENAME_LINKS.get(a).add(b);
+    RENAME_LINKS.get(b).add(a);
+  }
+
+  function relatedPaths(newRel) {
+    const out = new Set([newRel]);
+    const mapped = OLD_MAP[newRel];
+    if (mapped) out.add(mapped);
+    const linked = RENAME_LINKS.get(newRel);
+    if (linked) linked.forEach(p => out.add(p));
+    Object.keys(OLD_MAP).forEach(k => {
+      if (OLD_MAP[k] === newRel) out.add(k);
+    });
+    return [...out];
+  }
+
+  function resolveItemDate(name, newRel, oldRel) {
+    let r = parseDateFromString(name, '文件名');
+    if (r) return r;
+    if (oldRel) {
+      r = parseDateFromString(String(oldRel).replace(/^images\//, ''), '旧路径');
+      if (r) return r;
+    }
+    for (const rel of relatedPaths(newRel)) {
+      if (rel === newRel) continue;
+      r = parseDateFromString(String(rel).replace(/^images\//, ''), '重命名映射');
+      if (r) return r;
+    }
+    return null;
+  }
+
   function extractDate(name) {
-    const m = String(name).match(DATE_RE);
-    if (!m) return null;
-    const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
-    return isNaN(d.getTime()) ? null : d;
+    const r = parseDateFromString(name);
+    return r ? r.date : null;
   }
 
   function formatDate(d) {
@@ -585,22 +687,45 @@
     const enc = encodePath(rel);
     const hash = extractHash(name);
     const kind = fileKind(name);
-    const date = extractDate(name);
+    const mappedOld = oldRel || OLD_MAP[rel] || '';
+    const resolved = resolveItemDate(name, rel, mappedOld);
+    const date = resolved ? resolved.date : null;
     const pin = repoHeadCommit || REPO.branch;
     return {
       name,
       newRel: rel,
-      oldRel: oldRel || OLD_MAP[rel] || '',
+      oldRel: mappedOld,
       hash,
       kind,
       ext: extOf(name),
       date,
       dateStr: formatDate(date),
+      dateSource: resolved ? resolved.source : '',
       dupCount: 0,
       rev: 0,
       cdn: 'https://cdn.jsdelivr.net/gh/' + REPO.owner + '/' + REPO.repo + '@' + pin + '/' + enc,
       raw: 'https://raw.githubusercontent.com/' + REPO.owner + '/' + REPO.repo + '/' + pin + '/' + enc
     };
+  }
+
+  async function enrichDatesFromGit(items) {
+    const need = items.filter(i => !i.date);
+    if (!need.length || !token()) return;
+    let done = 0;
+    for (const item of need) {
+      try {
+        const data = await ghFetch('/commits?path=' + encodeURIComponent(item.newRel) + '&per_page=1');
+        const iso = data && data[0] && data[0].commit && data[0].commit.committer &&
+          data[0].commit.committer.date;
+        if (iso) {
+          item.date = new Date(iso);
+          item.dateStr = formatDate(item.date);
+          item.dateSource = 'Git 提交';
+        }
+      } catch (_) { /* skip */ }
+      done++;
+      if (done % 5 === 0) setStatus('补全日期 ' + done + '/' + need.length + '…');
+    }
   }
 
   async function fetchRepoHead() {
@@ -643,14 +768,18 @@
 
   async function fetchOldMapFromRemote() {
     const url = 'https://raw.githubusercontent.com/' +
-      REPO.owner + '/' + REPO.repo + '/' + REPO.branch + '/rename-mapping.csv';
-    const res = await fetch(url);
+      REPO.owner + '/' + REPO.repo + '/' + REPO.branch + '/rename-mapping.csv?t=' + Date.now();
+    const res = await fetch(url, { cache: 'no-store' });
+    OLD_MAP = {};
+    RENAME_LINKS.clear();
     if (!res.ok) return;
     const text = await res.text();
     const lines = text.split(/\r?\n/).filter(Boolean);
     for (let i = 1; i < lines.length; i++) {
       const m = lines[i].match(/^"([^"]*)","([^"]*)"/);
-      if (m && m[2]) OLD_MAP[m[2]] = m[1];
+      if (!m || !m[2]) continue;
+      OLD_MAP[m[2]] = m[1];
+      addRenameLink(m[1], m[2]);
     }
   }
 
@@ -1080,7 +1209,7 @@
     if (item.blobSha) rows.push(['Blob', item.blobSha]);
     if (item.size) rows.push(['大小', formatBytes(item.size)]);
     if (item.commitSha) rows.push(['Commit', item.commitSha.slice(0, 12) + '…']);
-    if (item.dateStr) rows.push(['时间', item.dateStr]);
+    if (item.dateStr) rows.push(['时间', item.dateStr + (item.dateSource ? ' (' + item.dateSource + ')' : '')]);
     if (item.dupCount > 1) rows.push(['重复', '同 hash 共 ' + item.dupCount + ' 个']);
 
     body.innerHTML = '<div class="detail-section"><h3>元数据</h3>' +
@@ -1227,6 +1356,7 @@
         if (old && old.rev) item.rev = old.rev;
         return item;
       });
+      await enrichDatesFromGit(ITEMS);
       phashCache.clear();
       similarScanned = false;
       autoSmartSelected = false;
@@ -1254,9 +1384,23 @@
     const meta = await getFileMeta(oldRel);
     await putFile(newRel, meta.content, null, 'gallery: rename to ' + newRel);
     await deleteFile(oldRel, meta.sha, 'gallery: remove old after rename ' + oldRel);
-    if (OLD_MAP[oldRel]) { OLD_MAP[newRel] = OLD_MAP[oldRel]; delete OLD_MAP[oldRel]; }
+    if (OLD_MAP[oldRel]) {
+      OLD_MAP[newRel] = OLD_MAP[oldRel];
+      delete OLD_MAP[oldRel];
+    } else {
+      OLD_MAP[newRel] = oldRel;
+    }
+    addRenameLink(oldRel, newRel);
+    const prev = ITEMS.find(i => i.newRel === oldRel);
     const idx = ITEMS.findIndex(i => i.newRel === oldRel);
-    if (idx >= 0) ITEMS[idx] = buildItem(newName, OLD_MAP[newRel]);
+    if (idx >= 0) {
+      ITEMS[idx] = buildItem(newName, OLD_MAP[newRel]);
+      if (!ITEMS[idx].date && prev && prev.date) {
+        ITEMS[idx].date = prev.date;
+        ITEMS[idx].dateStr = prev.dateStr;
+        ITEMS[idx].dateSource = (prev.dateSource || '文件名') + ' · 重命名继承';
+      }
+    }
     selected.delete(oldRel);
     if (detailItem && detailItem.newRel === oldRel) detailItem = ITEMS[idx];
     rebuildDupIndex();
