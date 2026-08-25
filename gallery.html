@@ -717,9 +717,108 @@
     }
     .scan-progress .bar-fill {
       height: 100%;
+      background: linear-gradient(90deg, var(--accent), #7c9aff);
+      border-radius: 999px;
+      transition: width .25s ease;
+    }
+    .similar-scan .scan-steps {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      margin-bottom: 12px;
+      font-size: 0.78rem;
+    }
+    .similar-scan .scan-steps span {
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--bg-hover);
+      color: var(--muted);
+    }
+    .similar-scan .scan-steps span.active {
+      background: var(--accent-dim);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .similar-scan .scan-steps span.done {
+      color: var(--success);
+    }
+    .similar-scan .scan-meta { font-size: 0.75rem; margin-top: 8px; }
+
+    .dup-workflow { display: flex; flex-direction: column; gap: 12px; }
+    .dup-toolbar-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .dup-select {
+      font-size: 0.78rem;
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--bg-panel);
+    }
+    .thresh-label { font-size: 0.78rem; color: var(--muted); }
+    .dup-warn {
+      padding: 10px 14px;
+      border-radius: 10px;
+      background: var(--warn-dim);
+      border: 1px solid rgba(217, 119, 6, 0.25);
+      color: var(--warn);
+      font-size: 0.82rem;
+    }
+    .dup-group-head { cursor: pointer; user-select: none; }
+    .dup-group.collapsed .dup-group-head { border-bottom: none; }
+    .dup-collapse-btn {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      font-size: 0.9rem;
+      padding: 2px 6px;
+      cursor: pointer;
+      border-radius: 6px;
+    }
+    .dup-collapse-btn:hover { background: var(--bg-active); color: var(--text); }
+    .card.sim-candidate { border-color: rgba(220, 38, 38, 0.25); }
+    .sim-score {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      z-index: 5;
+      font-size: 0.62rem;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 5px;
+      background: rgba(79, 110, 247, 0.92);
+      color: #fff;
+    }
+    .sim-bar {
+      position: absolute;
+      left: 8px;
+      right: 8px;
+      bottom: 52px;
+      height: 3px;
+      background: rgba(0,0,0,.08);
+      border-radius: 999px;
+      overflow: hidden;
+      z-index: 4;
+    }
+    .sim-bar-fill {
+      height: 100%;
       background: var(--accent);
       border-radius: 999px;
-      transition: width .2s;
+    }
+    .sidebar-foot .account-panel {
+      border-color: transparent;
+      background: transparent;
+      box-shadow: none;
+    }
+    .sidebar-foot .account-head { padding: 8px 4px; }
+    .sidebar-foot .account-sync {
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      margin-top: 6px;
+      background: var(--bg-panel);
     }
 
     /* Detail panel — ImageKit DAM metadata */

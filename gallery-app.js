@@ -45,8 +45,9 @@
   let similarScanned = false;
   let similarScanning = false;
   let autoSmartSelected = false;
-  /** CLIP cosine similarity threshold (0.85–0.99). Immich-style near-duplicate ≈ 0.95+. */
-  let similarThreshold = 0.95;
+  let similarThreshold = 0.98;
+  let similarMode = 'near';
+  const collapsedGroups = new Set();
   const CLIP_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']);
   /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
   let repoHeadCommit = null;
@@ -547,73 +548,76 @@
   }
 
   function cosineSimilarity(a, b) {
-    if (!a || !b || a.length !== b.length) return 0;
-    let dot = 0;
-    for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
-    return dot;
+    if (!clipModule) return 0;
+    return clipModule.cosineSimilarity(a, b);
   }
 
-  function clusterByEmbedding(items, minSimilarity) {
-    const n = items.length;
-    const parent = items.map((_, i) => i);
-    function find(x) {
-      while (parent[x] !== x) {
-        parent[x] = parent[parent[x]];
-        x = parent[x];
+  function formatSimPct(sim) {
+    if (clipModule) return clipModule.formatSimilarity(sim);
+    return Math.round(Math.max(0, Math.min(1, sim)) * 1000) / 10 + '%';
+  }
+
+  async function buildSimilarSetsAsync() {
+    const clip = await getClipModule();
+    const modeCfg = clip.getSimilarModeConfig(similarMode);
+    const images = ITEMS.filter(canClipEmbed).filter(i => i.embedding);
+    let clusters = clip.clusterCompleteLinkage(images, similarThreshold);
+    const refined = [];
+    for (const items of clusters) {
+      const sorted = sortItemsByDate(items);
+      const keep = sorted[sorted.length - 1];
+      let group = sorted;
+      if (modeCfg.ssim > 0) {
+        const after = await clip.refineGroupBySsim(
+          sorted,
+          keep.newRel,
+          (item) => srcOf(item),
+          modeCfg.ssim
+        );
+        if (after && after.length >= 2) group = sortItemsByDate(after);
+        else continue;
       }
-      return x;
+      if (isExactOnlyGroup(group)) continue;
+      const stats = clip.groupStats(group, keep.newRel);
+      refined.push({
+        id: 'sim-' + keep.newRel.slice(7, 20),
+        type: 'similar',
+        items: group,
+        keepRel: keep.newRel,
+        avgSimilarity: stats.avg,
+        minSimilarity: stats.min,
+        maxSimilarity: stats.max
+      });
     }
-    function unite(a, b) {
-      const ra = find(a);
-      const rb = find(b);
-      if (ra !== rb) parent[rb] = ra;
-    }
-    for (let i = 0; i < n; i++) {
-      for (let j = i + 1; j < n; j++) {
-        if (cosineSimilarity(items[i].embedding, items[j].embedding) >= minSimilarity) unite(i, j);
-      }
-    }
-    const buckets = new Map();
-    for (let i = 0; i < n; i++) {
-      const r = find(i);
-      if (!buckets.has(r)) buckets.set(r, []);
-      buckets.get(r).push(items[i]);
-    }
-    return [...buckets.values()].filter(g => g.length >= 2);
+    similarSets = refined.sort((a, b) => b.items.length - a.items.length);
+    const el = document.getElementById('similarCount');
+    if (el) el.textContent = String(similarSets.length);
   }
 
   function buildSimilarSets() {
+    if (!clipModule) return;
+    const modeCfg = clipModule.getSimilarModeConfig(similarMode);
     const images = ITEMS.filter(canClipEmbed).filter(i => i.embedding);
-    const clusters = clusterByEmbedding(images, similarThreshold);
+    const clusters = clipModule.clusterCompleteLinkage(images, similarThreshold);
     similarSets = clusters
       .filter(g => !isExactOnlyGroup(g))
-      .map((items, idx) => {
+      .map((items) => {
         const sorted = sortItemsByDate(items);
         const keep = sorted[sorted.length - 1];
-        const avgSim = computeGroupAvgSimilarity(sorted);
+        const stats = clipModule.groupStats(sorted, keep.newRel);
         return {
-          id: 'sim-' + idx,
+          id: 'sim-' + keep.newRel.slice(7, 20),
           type: 'similar',
           items: sorted,
           keepRel: keep.newRel,
-          avgSimilarity: avgSim
+          avgSimilarity: stats.avg,
+          minSimilarity: stats.min,
+          maxSimilarity: stats.max
         };
       })
       .sort((a, b) => b.items.length - a.items.length);
     const el = document.getElementById('similarCount');
     if (el) el.textContent = String(similarSets.length);
-  }
-
-  function computeGroupAvgSimilarity(items) {
-    let sum = 0;
-    let cnt = 0;
-    for (let i = 0; i < items.length; i++) {
-      for (let j = i + 1; j < items.length; j++) {
-        sum += cosineSimilarity(items[i].embedding, items[j].embedding);
-        cnt++;
-      }
-    }
-    return cnt ? sum / cnt : 0;
   }
 
   async function scanSimilarImages(force) {
@@ -622,6 +626,7 @@
     similarScanning = true;
     similarScanned = false;
     similarSets = [];
+    collapsedGroups.clear();
     const targets = ITEMS.filter(canClipEmbed);
     const total = targets.length;
     if (!total) {
@@ -631,53 +636,38 @@
       filter();
       return;
     }
-    let done = 0;
-    let cacheHits = 0;
-    let phase = 'model';
-    let phaseLabel = '正在加载 CLIP 模型（首次约 150MB，之后浏览器缓存）…';
-    const updateProgress = () => {
-      const pct = phase === 'model' ? 0 : Math.round((done / total) * 100);
+    const renderProgress = (p) => {
+      const pct = p.phase === 'model' ? 5 : p.phase === 'cluster' ? 95 : Math.round(10 + (p.done / p.total) * 80);
       const container = document.getElementById('mediaContainer');
       if (container && category === 'similar') {
         container.innerHTML =
-          '<div class="scan-progress">' +
-          '<div>' + escapeHtml(phaseLabel) + '</div>' +
+          '<div class="scan-progress similar-scan">' +
+          '<div class="scan-steps">' +
+          '<span class="' + (p.phase === 'model' ? 'active' : (pct > 10 ? 'done' : '')) + '">① 模型</span>' +
+          '<span class="' + (p.phase === 'encode' ? 'active' : (p.phase === 'cluster' ? 'done' : '')) + '">② 向量</span>' +
+          '<span class="' + (p.phase === 'cluster' ? 'active' : '') + '">③ 聚类</span>' +
+          '</div>' +
+          '<div>' + escapeHtml(p.label || '') + '</div>' +
           '<div class="bar"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
-          (phase === 'encode'
-            ? '<div>' + done + ' / ' + total + ' · 缓存命中 ' + cacheHits + '</div>'
-            : '<div>请稍候…</div>') +
+          '<div class="scan-meta">' + p.done + ' / ' + p.total + ' · 缓存命中 ' + (p.cacheHits || 0) + '</div>' +
           '</div>';
       }
-      if (phase === 'encode') setStatus('CLIP 分析 ' + done + '/' + total + '…');
+      if (p.phase === 'encode') setStatus('CLIP 分析 ' + p.done + '/' + p.total + '…');
     };
-    updateProgress();
+    renderProgress({ phase: 'model', done: 0, total, cacheHits: 0, label: '正在启动 Worker…' });
     try {
       const clip = await getClipModule();
-      await clip.ensureClip((data) => {
-        phaseLabel = clip.formatLoadProgress(data);
-        updateProgress();
+      const modeCfg = clip.getSimilarModeConfig(similarMode);
+      similarThreshold = modeCfg.threshold;
+      const { cacheHits } = await clip.scanEmbeddings({
+        items: targets,
+        repoHead: repoHeadCommit,
+        urlFor: (item) => srcOf(item),
+        onProgress: renderProgress
       });
-      phase = 'encode';
-      phaseLabel = '正在提取 CLIP 向量（IndexedDB 缓存加速）…';
-      updateProgress();
-      for (const item of targets) {
-        try {
-          const key = clip.cacheKeyFor(item, repoHeadCommit);
-          const { vec, fromCache } = await clip.getEmbedding(
-            item, [item.raw, item.cdn], key, null
-          );
-          item.embedding = vec;
-          item.embeddingKey = key;
-          if (fromCache) cacheHits++;
-        } catch (_) {
-          /* skip unreadable images */
-        }
-        done++;
-        if (done % 2 === 0 || done === total) updateProgress();
-      }
-      buildSimilarSets();
+      await buildSimilarSetsAsync();
       setStatus(
-        '相似分析完成：' + similarSets.length + ' 组（缓存命中 ' + cacheHits + '/' + total + '）',
+        '相似分析完成：' + similarSets.length + ' 组（缓存 ' + cacheHits + '/' + total + '）',
         'ok'
       );
     } catch (e) {
@@ -815,19 +805,35 @@
   }
 
   async function fetchOldMapFromRemote() {
-    const url = 'https://raw.githubusercontent.com/' +
-      REPO.owner + '/' + REPO.repo + '/' + REPO.branch + '/rename-mapping.csv?t=' + Date.now();
-    const res = await fetch(url, { cache: 'no-store' });
     OLD_MAP = {};
     RENAME_LINKS.clear();
-    if (!res.ok) return;
-    const text = await res.text();
-    const lines = text.split(/\r?\n/).filter(Boolean);
-    for (let i = 1; i < lines.length; i++) {
-      const m = lines[i].match(/^"([^"]*)","([^"]*)"/);
-      if (!m || !m[2]) continue;
-      OLD_MAP[m[2]] = m[1];
-      addRenameLink(m[1], m[2]);
+    const parseCsv = (text) => {
+      const lines = String(text || '').split(/\r?\n/).filter(Boolean);
+      for (let i = 1; i < lines.length; i++) {
+        const m = lines[i].match(/^"([^"]*)","([^"]*)"/);
+        if (!m || !m[2]) continue;
+        OLD_MAP[m[2]] = m[1];
+        addRenameLink(m[1], m[2]);
+      }
+    };
+    try {
+      const meta = await ghFetch('/contents/rename-mapping.csv?ref=' + REPO.branch);
+      if (meta && meta.content) {
+        parseCsv(atob(meta.content.replace(/\s/g, '')));
+        return;
+      }
+    } catch (_) { /* fallback */ }
+    const fallbacks = [
+      'https://cdn.jsdelivr.net/gh/' + REPO.owner + '/' + REPO.repo + '@' + (repoHeadCommit || REPO.branch) + '/rename-mapping.csv',
+      'https://raw.githubusercontent.com/' + REPO.owner + '/' + REPO.repo + '/' + REPO.branch + '/rename-mapping.csv'
+    ];
+    for (const url of fallbacks) {
+      try {
+        const res = await fetch(url + '?t=' + Date.now(), { cache: 'no-store' });
+        if (!res.ok) continue;
+        parseCsv(await res.text());
+        return;
+      } catch (_) { /* next */ }
     }
   }
 
@@ -1003,14 +1009,18 @@
     const isKeep = item.newRel === group.keepRel;
     const isDup = item.dupCount > 1;
     let html = '<article class="card' + (sel ? ' selected' : '') + (isKeep ? ' keep' : '') + (isDup ? ' dup' : '') +
+      (group.type === 'similar' && !isKeep ? ' sim-candidate' : '') +
       '" data-rel="' + escapeAttr(item.newRel) + '">';
     if (isKeep) html += '<span class="keep-badge">保留</span>';
     if (hasToken) {
       html += '<input type="checkbox" class="card-check"' + (sel ? ' checked' : '') + '>';
     }
     if (isDup && !isKeep) html += '<span class="badge">重复 ×' + item.dupCount + '</span>';
-    if (group.type === 'similar' && item.embedding) {
-      html += '<span class="badge" style="border-color:rgba(79,110,247,.3);color:var(--accent)" title="CLIP 相似">相似</span>';
+    if (group.type === 'similar' && !isKeep && item.simToKeep != null) {
+      const label = formatSimPct(item.simToKeep);
+      const pct = Math.round(Math.max(0, Math.min(1, item.simToKeep)) * 100);
+      html += '<span class="sim-score" title="相对保留项相似度">' + label + '</span>';
+      html += '<div class="sim-bar"><div class="sim-bar-fill" style="width:' + pct + '%"></div></div>';
     }
     if (item.kind !== 'image') html += '<span class="type-badge">' + escapeHtml(item.ext) + '</span>';
     html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
@@ -1027,47 +1037,72 @@
 
   function renderDupGroups(sets, mode) {
     const hasToken = !!token();
-    let html = '<div class="dup-toolbar">';
+    const modeCfg = clipModule ? clipModule.getSimilarModeConfig(similarMode) : null;
+    let html = '<div class="dup-workflow">';
+    html += '<div class="dup-toolbar">';
     html += '<div class="hint">';
     if (mode === 'exact') {
-      html += '按文件名 hash 精确分组。已<strong>智能选中较旧副本</strong>，每组保留最新一张。';
+      html += '按文件名 hash 精确分组。点击「智能选中」后才会勾选待删项。';
     } else {
-      html += 'CLIP 语义向量检测视觉相似图，阈值 ' + Math.round(similarThreshold * 100) + '%。已智能选中较旧副本。';
+      html += '<strong>相似审阅</strong> · 完全链接聚类 + SSIM 复核。请逐组确认后再删除。';
     }
     html += '</div>';
+    html += '<div class="dup-toolbar-actions">';
     html += '<button type="button" class="primary" data-dup-action="smart-select">智能选中待删</button>';
     html += '<button type="button" data-dup-action="clear-select">取消选中</button>';
     if (mode === 'similar') {
-      html += '<label>相似度 <input type="range" id="similarThreshold" min="85" max="99" value="' +
-        Math.round(similarThreshold * 100) + '"> <span id="thresholdVal">' +
-        Math.round(similarThreshold * 100) + '</span>%</label>';
+      html += '<select id="similarMode" class="dup-select">';
+      html += '<option value="near"' + (similarMode === 'near' ? ' selected' : '') + '>近重复 (98%)</option>';
+      html += '<option value="semantic"' + (similarMode === 'semantic' ? ' selected' : '') + '>语义相似 (92%)</option>';
+      html += '</select>';
+      const minPct = modeCfg ? Math.round(modeCfg.min * 100) : 85;
+      const maxPct = modeCfg ? Math.round(modeCfg.max * 100) : 99;
+      const curPct = Math.round(similarThreshold * 100);
+      html += '<label class="thresh-label">阈值 <input type="range" id="similarThreshold" min="' + minPct + '" max="' + maxPct + '" value="' + curPct + '"> <span id="thresholdVal">' + curPct + '</span>%</label>';
       html += '<button type="button" data-dup-action="rescan">重新扫描</button>';
     }
-    html += '</div>';
+    html += '</div></div>';
 
     if (!sets.length) {
-      html += '<div class="empty">' + (mode === 'exact' ? '未发现 hash 重复' : '未发现视觉相似组（可调低阈值后重新扫描）') + '</div>';
+      html += '<div class="empty">' + (mode === 'exact' ? '未发现 hash 重复' : '未发现视觉相似组（可调模式或阈值后重新扫描）') + '</div>';
+      html += '</div>';
       return html;
+    }
+
+    if (mode === 'similar' && selected.size > 0) {
+      html += '<div class="dup-warn">已选中 <strong>' + selected.size + '</strong> 张待删 · 删除前请再次确认</div>';
     }
 
     sets.forEach((group, gi) => {
       const keepItem = itemByRel(group.keepRel);
       const keepDate = keepItem && keepItem.dateStr ? keepItem.dateStr : '';
-      html += '<div class="dup-group" data-group-id="' + escapeAttr(group.id) + '">';
-      html += '<div class="dup-group-head">';
+      const collapsed = collapsedGroups.has(group.id);
+      const selectedInGroup = group.items.filter(i => selected.has(i.newRel)).length;
+      html += '<div class="dup-group' + (collapsed ? ' collapsed' : '') + '" data-group-id="' + escapeAttr(group.id) + '">';
+      html += '<div class="dup-group-head" data-group-toggle="' + escapeAttr(group.id) + '">';
+      html += '<button type="button" class="dup-collapse-btn" aria-label="展开/折叠">' + (collapsed ? '▸' : '▾') + '</button>';
       html += '<div class="dup-group-title">组 ' + (gi + 1) + ' · ' + group.items.length + ' 张';
+      if (selectedInGroup) html += ' · 已选 ' + selectedInGroup;
       if (mode === 'exact') html += '<span class="sub">hash 相同</span>';
-      else html += '<span class="sub">平均相似度 ' + Math.round((group.avgSimilarity || 0) * 100) + '%</span>';
+      else {
+        html += '<span class="sub">相似 ' + formatSimPct(group.minSimilarity || group.avgSimilarity) +
+          '–' + formatSimPct(group.maxSimilarity || group.avgSimilarity) +
+          ' · 均 ' + formatSimPct(group.avgSimilarity) + '</span>';
+      }
       if (keepDate) html += '<span class="sub">保留 ' + escapeHtml(keepDate) + '</span>';
       html += '</div>';
       html += '<div class="dup-group-actions">';
       html += '<button type="button" data-group-action="smart" data-group-id="' + escapeAttr(group.id) + '">本组智能选中</button>';
       html += '<button type="button" data-group-action="all" data-group-id="' + escapeAttr(group.id) + '">全选本组</button>';
       html += '</div></div>';
-      html += '<div class="grid dup-group-grid">';
-      group.items.forEach(item => { html += renderGroupCard(item, group, hasToken); });
-      html += '</div></div>';
+      if (!collapsed) {
+        html += '<div class="grid dup-group-grid">';
+        group.items.forEach(item => { html += renderGroupCard(item, group, hasToken); });
+        html += '</div>';
+      }
+      html += '</div>';
     });
+    html += '</div>';
     return html;
   }
 
@@ -1169,11 +1204,6 @@
 
       container.innerHTML = renderDupGroups(sets, mode);
 
-      if (!autoSmartSelected && sets.length) {
-        smartSelectGroups(sets, true);
-        autoSmartSelected = true;
-        container.innerHTML = renderDupGroups(sets, mode);
-      }
       updateSelUI();
       return;
     }
@@ -1514,7 +1544,12 @@
   async function batchDelete() {
     const rels = [...selected];
     if (!rels.length) return;
-    if (!confirm('确认删除 ' + rels.length + ' 个文件？此操作不可恢复。')) return;
+    const preview = rels.slice(0, 8).map(r => '· ' + r.slice(7)).join('\n');
+    const extra = rels.length > 8 ? '\n…等共 ' + rels.length + ' 个文件' : '';
+    const warn = (category === 'similar' || category === 'dup')
+      ? '\n\n⚠ 来自重复/相似分组，请确认保留项无误。'
+      : '';
+    if (!confirm('确认删除 ' + rels.length + ' 个文件？此操作不可恢复。' + warn + '\n\n' + preview + extra)) return;
     setStatus('删除中 0/' + rels.length + '…');
     let ok = 0;
     for (let i = 0; i < rels.length; i++) {
@@ -1612,6 +1647,9 @@
         const action = dupBtn.dataset.dupAction;
         const sets = getSetsForCategory();
         if (action === 'smart-select') {
+          const sets = getSetsForCategory();
+          const count = sets.reduce((n, g) => n + g.items.filter(i => i.newRel !== g.keepRel).length, 0);
+          if (count && !confirm('将智能选中 ' + count + ' 张较旧副本（每组保留最新一张）。确认？')) return;
           smartSelectGroups(sets, true);
           filter();
         } else if (action === 'clear-select') {
@@ -1623,6 +1661,15 @@
           autoSmartSelected = false;
           scanSimilarImages(true);
         }
+        return;
+      }
+
+      const toggleHead = e.target.closest('[data-group-toggle]');
+      if (toggleHead && !e.target.closest('[data-group-action]')) {
+        const gid = toggleHead.dataset.groupToggle;
+        if (collapsedGroups.has(gid)) collapsedGroups.delete(gid);
+        else collapsedGroups.add(gid);
+        filter();
         return;
       }
 
@@ -1736,12 +1783,26 @@
       if (val) val.textContent = String(+e.target.value);
     });
 
-    document.getElementById('mediaContainer').addEventListener('change', e => {
+    document.getElementById('mediaContainer').addEventListener('change', async e => {
+      if (e.target.id === 'similarMode') {
+        similarMode = e.target.value;
+        const clip = await getClipModule();
+        similarThreshold = clip.getSimilarModeConfig(similarMode).threshold;
+        autoSmartSelected = false;
+        if (ITEMS.some(i => i.embedding)) {
+          await buildSimilarSetsAsync();
+          filter();
+        } else {
+          similarScanned = false;
+          scanSimilarImages(true);
+        }
+        return;
+      }
       if (e.target.id !== 'similarThreshold') return;
       similarThreshold = +e.target.value / 100;
       autoSmartSelected = false;
       if (ITEMS.some(i => i.embedding)) {
-        buildSimilarSets();
+        await buildSimilarSetsAsync();
         filter();
       } else {
         similarScanned = false;

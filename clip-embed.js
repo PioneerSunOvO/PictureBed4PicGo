@@ -1,17 +1,24 @@
 /**
- * CLIP ViT-B/32 image embeddings for browser-side similarity detection.
- * Model weights cached via Transformers.js (Cache API); vectors in IndexedDB.
+ * CLIP similarity utilities: IndexedDB cache, clustering, SSIM refine, worker scanner.
  */
 export const MODEL_ID = 'Xenova/clip-vit-base-patch32';
+export const CACHE_VERSION = 2;
 const DB_NAME = 'pb4pg_clip_cache';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE = 'embeddings';
-const TRANSFORMERS_CDN =
-  'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/+esm';
 
-let extractor = null;
-let loadPromise = null;
+const SIMILAR_MODES = {
+  near: { label: '近重复', threshold: 0.98, min: 0.96, max: 0.995, ssim: 0.88 },
+  semantic: { label: '语义相似', threshold: 0.92, min: 0.85, max: 0.97, ssim: 0.75 }
+};
+
+export function getSimilarModeConfig(mode) {
+  return SIMILAR_MODES[mode] || SIMILAR_MODES.near;
+}
+
 const memCache = new Map();
+let worker = null;
+let workerReady = null;
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -45,60 +52,165 @@ function idbPut(record) {
   }));
 }
 
-function idbDelete(key) {
-  return openDb().then(db => new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).delete(key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  }));
+export async function invalidateCache(key) {
+  memCache.delete(key);
+  try {
+    const db = await openDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (_) { /* ignore */ }
 }
 
-/** Stable cache key: prefer Git blob SHA, else commit + path. */
+export function clearMemCache() {
+  memCache.clear();
+}
+
 export function cacheKeyFor(item, repoHead) {
-  if (item && item.blobSha) return MODEL_ID + '::' + item.blobSha;
-  const rel = item && item.newRel ? item.newRel : String(item || '');
-  return MODEL_ID + '::' + (repoHead || 'head') + '::' + rel;
+  if (item?.blobSha) return MODEL_ID + '::v' + CACHE_VERSION + '::' + item.blobSha;
+  const rel = item?.newRel ? item.newRel : String(item || '');
+  return MODEL_ID + '::v' + CACHE_VERSION + '::' + (repoHead || 'head') + '::' + rel;
+}
+
+export function normalizeVec(vec) {
+  const out = vec instanceof Float32Array ? new Float32Array(vec) : new Float32Array(vec);
+  let norm = 0;
+  for (let i = 0; i < out.length; i++) norm += out[i] * out[i];
+  norm = Math.sqrt(norm) || 1;
+  for (let i = 0; i < out.length; i++) out[i] /= norm;
+  return out;
 }
 
 export function cosineSimilarity(a, b) {
   if (!a || !b || a.length !== b.length) return 0;
+  const va = normalizeVec(a);
+  const vb = normalizeVec(b);
   let dot = 0;
-  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
-  return dot;
+  for (let i = 0; i < va.length; i++) dot += va[i] * vb[i];
+  return Math.max(-1, Math.min(1, dot));
+}
+
+export function formatSimilarity(sim) {
+  const pct = Math.round(Math.max(0, Math.min(1, sim)) * 1000) / 10;
+  return pct + '%';
+}
+
+export function formatLoadProgress(data) {
+  if (!data) return '加载 CLIP 模型…';
+  if (data.status === 'initiate') return '准备下载模型…';
+  if (data.status === 'download' && data.total) {
+    return '下载 CLIP 模型 ' + Math.round((data.loaded / data.total) * 100) + '%';
+  }
+  if (data.status === 'done') return '模型就绪';
+  if (data.status === 'progress' && data.file) return '加载 ' + data.file;
+  return '加载 CLIP 模型…';
+}
+
+async function getCachedVec(key) {
+  if (memCache.has(key)) return { vec: memCache.get(key), fromCache: true };
+  const stored = await idbGet(key);
+  if (stored?.vec && stored.version === CACHE_VERSION && stored.model === MODEL_ID) {
+    const vec = normalizeVec(new Float32Array(stored.vec));
+    memCache.set(key, vec);
+    return { vec, fromCache: true };
+  }
+  return null;
+}
+
+async function storeVec(key, vec, rel) {
+  const normalized = normalizeVec(vec);
+  memCache.set(key, normalized);
+  await idbPut({
+    key,
+    model: MODEL_ID,
+    version: CACHE_VERSION,
+    vec: normalized.buffer.slice(0),
+    dim: normalized.length,
+    rel,
+    ts: Date.now()
+  });
+  return normalized;
+}
+
+function ensureWorker() {
+  if (workerReady) return workerReady;
+  worker = new Worker(new URL('./clip-worker.js', import.meta.url), { type: 'module' });
+  workerReady = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Worker 启动超时')), 120000);
+    worker.onmessage = (e) => {
+      const msg = e.data || {};
+      if (msg.type === 'ready') {
+        clearTimeout(timer);
+        resolve(worker);
+      } else if (msg.type === 'error' && !msg.id) {
+        clearTimeout(timer);
+        reject(new Error(msg.message || 'Worker error'));
+      }
+    };
+    worker.onerror = (err) => {
+      clearTimeout(timer);
+      reject(err);
+    };
+    worker.postMessage({ type: 'init' });
+  });
+  return workerReady;
+}
+
+function encodeInWorker(id, key, url) {
+  return new Promise((resolve, reject) => {
+    const onMsg = (e) => {
+      const msg = e.data || {};
+      if (msg.type === 'encoded' && msg.id === id) {
+        worker.removeEventListener('message', onMsg);
+        resolve(normalizeVec(new Float32Array(msg.vec)));
+      } else if (msg.type === 'error' && msg.id === id) {
+        worker.removeEventListener('message', onMsg);
+        reject(new Error(msg.message || 'encode failed'));
+      }
+    };
+    worker.addEventListener('message', onMsg);
+    worker.postMessage({ type: 'encode', id, key, url });
+  });
 }
 
 /**
- * Load CLIP model (once). Weights cached in browser Cache API by Transformers.js.
- * @param {function} onProgress - ({ status, file, progress, loaded, total })
+ * Complete-linkage clustering: every pair in a cluster must meet minSimilarity.
  */
-export async function ensureClip(onProgress) {
-  if (extractor) return extractor;
-  if (loadPromise) return loadPromise;
-  loadPromise = (async () => {
-    const { pipeline, env } = await import(TRANSFORMERS_CDN);
-    env.allowLocalModels = false;
-    env.useBrowserCache = true;
-    if (env.backends && env.backends.onnx && env.backends.onnx.wasm) {
-      env.backends.onnx.wasm.numThreads = Math.min(navigator.hardwareConcurrency || 4, 8);
-    }
-    extractor = await pipeline('image-feature-extraction', MODEL_ID, {
-      quantized: true,
-      progress_callback: (data) => {
-        if (onProgress) onProgress(data);
+export function clusterCompleteLinkage(items, minSimilarity) {
+  const n = items.length;
+  if (n < 2) return [];
+  let clusters = items.map((item, i) => [i]);
+
+  while (clusters.length > 1) {
+    let bestA = -1;
+    let bestB = -1;
+    let bestMin = -1;
+    for (let a = 0; a < clusters.length; a++) {
+      for (let b = a + 1; b < clusters.length; b++) {
+        let pairMin = 1;
+        for (const i of clusters[a]) {
+          for (const j of clusters[b]) {
+            pairMin = Math.min(pairMin, cosineSimilarity(items[i].embedding, items[j].embedding));
+          }
+        }
+        if (pairMin >= minSimilarity && pairMin > bestMin) {
+          bestMin = pairMin;
+          bestA = a;
+          bestB = b;
+        }
       }
-    });
-    return extractor;
-  })();
-  try {
-    return await loadPromise;
-  } catch (e) {
-    loadPromise = null;
-    throw e;
+    }
+    if (bestA < 0) break;
+    clusters[bestA] = clusters[bestA].concat(clusters[bestB]);
+    clusters.splice(bestB, 1);
   }
+  return clusters.map(c => c.map(i => items[i])).filter(g => g.length >= 2);
 }
 
-async function loadImage(url) {
+function loadImage(url) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -108,92 +220,175 @@ async function loadImage(url) {
   });
 }
 
-async function imageToBlob(img) {
-  const maxSide = 512;
-  let w = img.naturalWidth || img.width;
-  let h = img.naturalHeight || img.height;
-  if (w > maxSide || h > maxSide) {
-    const scale = maxSide / Math.max(w, h);
-    w = Math.round(w * scale);
-    h = Math.round(h * scale);
-  }
+async function gray64FromUrl(url) {
+  const img = await loadImage(url);
+  const size = 64;
   const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
+  canvas.width = size;
+  canvas.height = size;
   const ctx = canvas.getContext('2d');
-  ctx.drawImage(img, 0, 0, w, h);
-  return new Promise((resolve, reject) => {
-    canvas.toBlob(b => (b ? resolve(b) : reject(new Error('canvas toBlob failed'))), 'image/png');
-  });
+  ctx.drawImage(img, 0, 0, size, size);
+  const px = ctx.getImageData(0, 0, size, size).data;
+  const gray = new Float32Array(size * size);
+  for (let i = 0; i < size * size; i++) {
+    const o = i * 4;
+    gray[i] = 0.299 * px[o] + 0.587 * px[o + 1] + 0.114 * px[o + 2];
+  }
+  return gray;
 }
 
-async function encodeBlob(model, blob) {
-  const { RawImage } = await import(TRANSFORMERS_CDN);
-  const raw = await RawImage.fromBlob(blob);
-  const out = await model(raw, { pooling: 'mean', normalize: true });
-  const data = out && out.data;
-  if (!data || !data.length) throw new Error('empty CLIP embedding');
-  return new Float32Array(data);
+/** Lightweight SSIM on 64×64 grayscale (structural check for near-duplicates). */
+export function ssimGray64(a, b) {
+  const n = a.length;
+  let meanA = 0;
+  let meanB = 0;
+  for (let i = 0; i < n; i++) {
+    meanA += a[i];
+    meanB += b[i];
+  }
+  meanA /= n;
+  meanB /= n;
+  let varA = 0;
+  let varB = 0;
+  let cov = 0;
+  for (let i = 0; i < n; i++) {
+    const da = a[i] - meanA;
+    const db = b[i] - meanB;
+    varA += da * da;
+    varB += db * db;
+    cov += da * db;
+  }
+  varA /= n;
+  varB /= n;
+  cov /= n;
+  const c1 = 0.01 * 255 * 0.01 * 255;
+  const c2 = 0.03 * 255 * 0.03 * 255;
+  const num = (2 * meanA * meanB + c1) * (2 * cov + c2);
+  const den = (meanA * meanA + meanB * meanB + c1) * (varA + varB + c2);
+  return den ? num / den : 0;
+}
+
+export async function refineGroupBySsim(items, keepRel, urlsFor, minSsim) {
+  const keep = items.find(i => i.newRel === keepRel) || items[0];
+  const keepUrl = urlsFor(keep);
+  let keepGray;
+  try {
+    keepGray = await gray64FromUrl(keepUrl);
+  } catch (_) {
+    return items;
+  }
+  const refined = [keep];
+  for (const item of items) {
+    if (item.newRel === keep.newRel) continue;
+    try {
+      const g = await gray64FromUrl(urlsFor(item));
+      const s = ssimGray64(keepGray, g);
+      item.ssimToKeep = s;
+      if (s >= minSsim) refined.push(item);
+    } catch (_) { /* drop unreadable */ }
+  }
+  return refined.length >= 2 ? refined : [];
+}
+
+export function groupStats(items, keepRel) {
+  const keep = items.find(i => i.newRel === keepRel) || items[0];
+  let min = 1;
+  let max = 0;
+  let sum = 0;
+  let cnt = 0;
+  for (const item of items) {
+    if (item === keep) continue;
+    const s = cosineSimilarity(keep.embedding, item.embedding);
+    item.simToKeep = s;
+    min = Math.min(min, s);
+    max = Math.max(max, s);
+    sum += s;
+    cnt++;
+  }
+  return {
+    min: cnt ? min : 1,
+    max: cnt ? max : 1,
+    avg: cnt ? sum / cnt : 1
+  };
 }
 
 /**
- * Get 512-d CLIP embedding for an item. Checks memory → IndexedDB → compute.
- * @returns {{ vec: Float32Array, fromCache: boolean }}
+ * Scan items: incremental IndexedDB + Web Worker encoding.
+ * @param {object} opts
+ * @param {Array} opts.items
+ * @param {string} opts.repoHead
+ * @param {function} opts.urlFor - (item) => string
+ * @param {function} [opts.onProgress] - ({phase, done, total, cacheHits, label})
  */
-export async function getEmbedding(item, urls, key, onModelProgress) {
-  if (memCache.has(key)) {
-    return { vec: memCache.get(key), fromCache: true };
-  }
-  const stored = await idbGet(key);
-  if (stored && stored.vec && stored.model === MODEL_ID) {
-    const vec = new Float32Array(stored.vec);
-    memCache.set(key, vec);
-    return { vec, fromCache: true };
+export async function scanEmbeddings(opts) {
+  const { items, repoHead, urlFor, onProgress } = opts;
+  await ensureWorker();
+
+  let done = 0;
+  let cacheHits = 0;
+  const total = items.length;
+  const pending = [];
+
+  onProgress?.({ phase: 'model', done: 0, total, cacheHits, label: '正在加载 CLIP 模型（Worker）…' });
+
+  for (const item of items) {
+    const key = cacheKeyFor(item, repoHead);
+    const cached = await getCachedVec(key);
+    if (cached) {
+      item.embedding = cached.vec;
+      item.embeddingKey = key;
+      cacheHits++;
+      done++;
+      if (done % 3 === 0 || done === total) {
+        onProgress?.({ phase: 'encode', done, total, cacheHits, label: '读取缓存向量…' });
+      }
+      continue;
+    }
+    pending.push({ item, key });
   }
 
-  const model = await ensureClip(onModelProgress);
-  let lastErr;
-  for (const url of urls) {
-    try {
-      const img = await loadImage(url);
-      const blob = await imageToBlob(img);
-      const vec = await encodeBlob(model, blob);
-      memCache.set(key, vec);
-      await idbPut({
-        key,
-        model: MODEL_ID,
-        vec: vec.buffer.slice(0),
-        dim: vec.length,
-        rel: item.newRel,
-        ts: Date.now()
-      });
-      return { vec, fromCache: false };
-    } catch (e) {
-      lastErr = e;
+  onProgress?.({
+    phase: 'encode',
+    done,
+    total,
+    cacheHits,
+    label: '正在提取向量（' + pending.length + ' 张待计算）…'
+  });
+
+  let encodeId = 0;
+  for (const { item, key } of pending) {
+    const urls = [urlFor(item)];
+    let vec = null;
+    let lastErr;
+    for (const url of urls) {
+      try {
+        vec = await encodeInWorker('e' + (encodeId++), key, url);
+        break;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    if (vec) {
+      item.embedding = await storeVec(key, vec, item.newRel);
+      item.embeddingKey = key;
+    }
+    done++;
+    if (done % 1 === 0 || done === total) {
+      onProgress?.({ phase: 'encode', done, total, cacheHits, label: '提取 CLIP 向量…' });
+    }
+    if (!vec && lastErr) {
+      /* skip item */
     }
   }
-  throw lastErr || new Error('无法计算 CLIP embedding');
+
+  onProgress?.({ phase: 'cluster', done: total, total, cacheHits, label: '聚类分析…' });
+  return { cacheHits, encoded: pending.length };
 }
 
-export async function invalidateCache(key) {
-  memCache.delete(key);
-  try {
-    await idbDelete(key);
-  } catch (_) { /* ignore */ }
-}
-
-export async function clearMemCache() {
-  memCache.clear();
-}
-
-export function formatLoadProgress(data) {
-  if (!data) return '';
-  if (data.status === 'initiate') return '准备下载模型…';
-  if (data.status === 'download' && data.total) {
-    const pct = Math.round((data.loaded / data.total) * 100);
-    return '下载 CLIP 模型 ' + pct + '%';
+export function terminateWorker() {
+  if (worker) {
+    worker.terminate();
+    worker = null;
+    workerReady = null;
   }
-  if (data.status === 'done') return '模型就绪';
-  if (data.status === 'progress' && data.file) return '加载 ' + data.file;
-  return '加载 CLIP 模型…';
 }
