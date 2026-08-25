@@ -51,7 +51,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'lb-actions-3';
+  const ASSET_VERSION = 'lb-backdrop-4';
   const ACTIONS_SIMILAR_URL =
     'https://github.com/PioneerSunOvO/PictureBed4PicGo/actions/workflows/similar-index.yml';
   /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
@@ -2208,8 +2208,10 @@
     });
 
     document.getElementById('lightbox').onclick = e => {
-      if (lbFullscreen) return;
-      if (e.target.id === 'lightbox' || e.target.classList.contains('lightbox-stage')) closeLightbox();
+      // Keep interactions on media / controls; close when clicking empty/backdrop areas.
+      if (e.target.closest('img, video, audio, iframe, .lightbox-text')) return;
+      if (e.target.closest('button, a, input, .lightbox-actions, .lightbox-caption, .lb-thumbs, .lb-pane-label')) return;
+      closeLightbox();
     };
     document.getElementById('lightboxExit').onclick = e => {
       e.stopPropagation();
