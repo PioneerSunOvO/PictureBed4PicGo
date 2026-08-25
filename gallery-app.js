@@ -519,6 +519,7 @@
       delete item.embedding;
       delete item.embeddingKey;
       delete item.phash;
+      delete item.phashLowEntropy;
       delete item.simToKeep;
       delete item.ssimToKeep;
       delete item.phashDistToKeep;
@@ -705,7 +706,7 @@
     try {
       const phashRes = await clip.scanPhashes({
         items: targets,
-        urlFor: (item) => srcOf(item),
+        urlFor: (item) => urlsFor(item),
         onProgress
       });
 
@@ -749,7 +750,8 @@
         ? '相似分析完成：' + similarSets.length + ' 组'
         : '相似分析完成（仅 pHash）：' + similarSets.length + ' 组';
       const detail = ' · pHash缓存 ' + phashRes.cacheHits + '/' + total +
-        (clipAvailable ? ' · CLIP缓存 ' + clipRes.cacheHits + '/' + total : ' · CLIP 不可用');
+        (phashRes.failed ? ' · pHash失败 ' + phashRes.failed : '') +
+        (clipAvailable ? ' · CLIP缓存 ' + clipRes.cacheHits + '/' + total : ' · CLIP: ' + (clipRes.error || '不可用'));
       setStatus(status + detail, clipAvailable ? 'ok' : 'err');
     } catch (e) {
       setStatus('相似分析失败: ' + e.message, 'err');
@@ -998,6 +1000,15 @@
     });
   }
 
+  function urlsFor(item) {
+    const primary = srcOf(item);
+    const urls = [primary];
+    if (primary.includes('cdn.jsdelivr.net/gh/')) {
+      urls.push(primary.replace('cdn.jsdelivr.net/gh/', 'raw.githubusercontent.com/').replace(/@[a-f0-9]{40}\//, '/master/'));
+    }
+    return urls;
+  }
+
   function srcOf(item) {
     const source = document.getElementById('source');
     const enc = encodePath(item.newRel);
@@ -1136,6 +1147,8 @@
       if (scanMeta) {
         html += '<div class="scan-summary">';
         html += '引擎：' + (scanMeta.clipAvailable ? 'pHash+CLIP' : '仅 pHash（CLIP 降级）');
+        if (scanMeta.clipError) html += ' · ' + escapeHtml(String(scanMeta.clipError).slice(0, 80));
+        if (scanMeta.phashFailed) html += ' · pHash失败 ' + scanMeta.phashFailed;
         if (scanMeta.clipHost) html += ' · ' + escapeHtml(scanMeta.clipHost.replace(/^https?:\/\//, '').slice(0, 40));
         html += ' · 确认对 ' + scanMeta.confirmedPairs + ' · 疑似对 ' + scanMeta.suspectPairs;
         html += '</div>';

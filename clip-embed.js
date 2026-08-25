@@ -2,7 +2,7 @@
  * Multi-signal similarity: pHash (fast) + CLIP (optional) + contain SSIM (gray zone).
  */
 export const MODEL_ID = 'Xenova/clip-vit-base-patch32';
-export const ALGO_VERSION = 3;
+export const ALGO_VERSION = 4;
 export const CACHE_VERSION = 3;
 const DB_NAME = 'pb4pg_clip_cache';
 const DB_VERSION = 3;
@@ -18,10 +18,12 @@ export const SIMILAR_MODES = {
     clipGrayMin: 0.94,
     clipHigh: 0.97,
     ssim: 0.85,
-    phashMax: 10,
-    phashSuspectMax: 14,
+    phashMax: 8,
+    phashStrictMax: 4,
+    phashSuspectMax: 11,
+    lowEntropyVar: 120,
     useSsim: true,
-    maxGroupSize: 12
+    maxGroupSize: 6
   },
   semantic: {
     label: '语义相似',
@@ -47,6 +49,7 @@ let worker = null;
 let workerReady = null;
 let workerHost = null;
 let clipAvailable = true;
+let lastClipError = null;
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -230,7 +233,33 @@ export function formatLoadProgress(data) {
 }
 
 export function getClipStatus() {
-  return { available: clipAvailable, host: workerHost };
+  return { available: clipAvailable, host: workerHost, error: lastClipError };
+}
+
+async function loadImageFromUrls(urlOrUrls) {
+  const urls = Array.isArray(urlOrUrls) ? urlOrUrls : [urlOrUrls];
+  let lastErr;
+  for (const url of urls) {
+    try {
+      return await loadImage(url);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('image load failed');
+}
+
+function grayVariance(gray) {
+  const n = gray.length;
+  let mean = 0;
+  for (let i = 0; i < n; i++) mean += gray[i];
+  mean /= n;
+  let v = 0;
+  for (let i = 0; i < n; i++) {
+    const d = gray[i] - mean;
+    v += d * d;
+  }
+  return v / n;
 }
 
 function loadImage(url) {
@@ -256,9 +285,9 @@ function rgbGray(r, g, b) {
   return 0.299 * r + 0.587 * g + 0.114 * b;
 }
 
-/** 64-bit difference hash (dHash). */
-export async function computePhashFromUrl(url) {
-  const img = await loadImage(url);
+/** 64-bit difference hash (dHash) + low-entropy flag for blank/near-uniform images. */
+export async function computePhashFromUrl(urlOrUrls) {
+  const img = await loadImageFromUrls(urlOrUrls);
   const w = 9;
   const h = 8;
   const canvas = document.createElement('canvas');
@@ -268,20 +297,25 @@ export async function computePhashFromUrl(url) {
   drawImageContain(ctx, img, w, h);
   const px = ctx.getImageData(0, 0, w, h).data;
   let bits = '';
+  const graySmall = new Float32Array(w * h);
   for (let y = 0; y < h; y++) {
-    for (let x = 0; x < 8; x++) {
-      const o1 = (y * w + x) * 4;
-      const o2 = (y * w + x + 1) * 4;
-      const g1 = rgbGray(px[o1], px[o1 + 1], px[o1 + 2]);
-      const g2 = rgbGray(px[o2], px[o2 + 1], px[o2 + 2]);
-      bits += g1 < g2 ? '1' : '0';
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4;
+      const g = rgbGray(px[o], px[o + 1], px[o + 2]);
+      graySmall[y * w + x] = g;
+      if (x < 8) {
+        const o2 = (y * w + x + 1) * 4;
+        const g2 = rgbGray(px[o2], px[o2 + 1], px[o2 + 2]);
+        bits += g < g2 ? '1' : '0';
+      }
     }
   }
-  return bits;
+  const variance = grayVariance(graySmall);
+  return { hash: bits, lowEntropy: variance < 120 };
 }
 
-async function gray64ContainFromUrl(url) {
-  const img = await loadImage(url);
+async function gray64ContainFromUrl(urlOrUrls) {
+  const img = await loadImageFromUrls(urlOrUrls);
   const size = 64;
   const canvas = document.createElement('canvas');
   canvas.width = size;
@@ -331,15 +365,17 @@ async function getCachedPhash(key) {
   if (phashMem.has(key)) return phashMem.get(key);
   const stored = await idbGet(PHASH_STORE, key);
   if (stored?.hash && stored.version === ALGO_VERSION) {
-    phashMem.set(key, stored.hash);
-    return stored.hash;
+    const rec = { hash: stored.hash, lowEntropy: !!stored.lowEntropy };
+    phashMem.set(key, rec);
+    return rec;
   }
   return null;
 }
 
-async function storePhash(key, hash, rel) {
-  phashMem.set(key, hash);
-  await idbPut(PHASH_STORE, { key, hash, version: ALGO_VERSION, rel, ts: Date.now() });
+async function storePhash(key, hash, rel, lowEntropy) {
+  const rec = { hash, lowEntropy: !!lowEntropy };
+  phashMem.set(key, rec);
+  await idbPut(PHASH_STORE, { key, hash, version: ALGO_VERSION, rel, lowEntropy: !!lowEntropy, ts: Date.now() });
 }
 
 async function getCachedVec(key) {
@@ -396,9 +432,10 @@ function ensureWorker() {
       } else if (msg.type === 'error' && !msg.id) {
         clearTimeout(timer);
         worker.removeEventListener('message', onMsg);
+        lastClipError = msg.message || 'Worker error';
         clipAvailable = false;
         resetWorker();
-        reject(new Error(msg.message || 'Worker error'));
+        reject(new Error(lastClipError));
       }
     };
     worker.addEventListener('message', onMsg);
@@ -437,27 +474,34 @@ export async function scanPhashes(opts) {
   const { items, urlFor, onProgress } = opts;
   let done = 0;
   let cacheHits = 0;
+  let failed = 0;
   const total = items.length;
   for (const item of items) {
     const key = phashKeyFor(item);
     const cached = await getCachedPhash(key);
     if (cached) {
-      item.phash = cached;
+      item.phash = cached.hash;
+      item.phashLowEntropy = cached.lowEntropy;
       cacheHits++;
     } else {
       try {
-        item.phash = await computePhashFromUrl(urlFor(item));
-        await storePhash(key, item.phash, item.newRel);
+        const urls = urlFor(item);
+        const result = await computePhashFromUrl(urls);
+        item.phash = result.hash;
+        item.phashLowEntropy = result.lowEntropy;
+        await storePhash(key, result.hash, item.newRel, result.lowEntropy);
       } catch (_) {
         item.phash = null;
+        item.phashLowEntropy = false;
+        failed++;
       }
     }
     done++;
     if (done % 2 === 0 || done === total) {
-      onProgress?.({ phase: 'phash', done, total, cacheHits, label: '感知哈希 ' + done + '/' + total });
+      onProgress?.({ phase: 'phash', done, total, cacheHits, label: '感知哈希 ' + done + '/' + total + (failed ? '（失败 ' + failed + '）' : '') });
     }
   }
-  return { cacheHits };
+  return { cacheHits, failed };
 }
 
 /**
@@ -478,8 +522,9 @@ export async function scanEmbeddings(opts) {
     await ensureWorker();
   } catch (e) {
     clipAvailable = false;
-    onProgress?.({ phase: 'encode', done: total, total, cacheHits, label: 'CLIP 不可用，仅感知哈希' });
-    return { cacheHits: 0, encoded: 0, failed: total, clipAvailable: false, error: e.message };
+    lastClipError = e.message || String(e);
+    onProgress?.({ phase: 'encode', done: total, total, cacheHits, label: 'CLIP 不可用：' + lastClipError });
+    return { cacheHits: 0, encoded: 0, failed: total, clipAvailable: false, error: lastClipError };
   }
 
   for (const item of items) {
@@ -545,7 +590,7 @@ function pairKey(i, j) {
 }
 
 function formatPath(edge) {
-  if (edge.path === 'phash') return 'pHash≤' + edge.phashDist;
+  if (edge.path === 'phash' || edge.path === 'phash-low') return 'pHash≤' + edge.phashDist;
   if (edge.path === 'clip') return 'CLIP ' + formatSimilarity(edge.clip);
   if (edge.path === 'clip+ssim') {
     return 'CLIP ' + formatSimilarity(edge.clip) + ' + SSIM ' + Math.round(edge.ssim * 1000) / 10 + '%';
@@ -565,8 +610,10 @@ async function evaluatePair(a, b, ai, bi, mode, threshold, urlFor, hasClip) {
     ? cosineSimilarity(a.embedding, b.embedding) : null;
 
   if (mode === 'near') {
-    if (phashDist <= cfg.phashMax) {
-      return { i: ai, j: bi, confirmed: true, suspect: false, path: 'phash', phashDist, clip };
+    const lowEnt = !!(a.phashLowEntropy || b.phashLowEntropy);
+    const phashLimit = lowEnt ? (cfg.phashStrictMax ?? 4) : cfg.phashMax;
+    if (phashDist <= phashLimit) {
+      return { i: ai, j: bi, confirmed: true, suspect: false, path: lowEnt ? 'phash-low' : 'phash', phashDist, clip };
     }
     if (clip != null && clip >= cfg.clipHigh) {
       return { i: ai, j: bi, confirmed: true, suspect: false, path: 'clip', phashDist, clip };
@@ -596,6 +643,39 @@ async function evaluatePair(a, b, ai, bi, mode, threshold, urlFor, hasClip) {
     return { i: ai, j: bi, confirmed: false, suspect: true, path: 'semantic-suspect', phashDist, clip };
   }
   return null;
+}
+
+/** Complete-linkage clustering: every cross-pair must exist in confirmed edges. */
+export function clusterCompleteLinkageFromPairs(n, pairs, maxGroupSize) {
+  const pairSet = new Set(pairs.map(p => pairKey(p.i, p.j)));
+  let clusters = Array.from({ length: n }, (_, i) => [i]);
+
+  function canMerge(a, b) {
+    for (const i of clusters[a]) {
+      for (const j of clusters[b]) {
+        if (!pairSet.has(pairKey(i, j))) return false;
+      }
+    }
+    return true;
+  }
+
+  while (clusters.length > 1) {
+    let merged = false;
+    for (let a = 0; a < clusters.length && !merged; a++) {
+      for (let b = a + 1; b < clusters.length; b++) {
+        const combined = clusters[a].length + clusters[b].length;
+        if (maxGroupSize && combined > maxGroupSize) continue;
+        if (!canMerge(a, b)) continue;
+        clusters[a] = clusters[a].concat(clusters[b]);
+        clusters.splice(b, 1);
+        merged = true;
+        break;
+      }
+    }
+    if (!merged) break;
+  }
+
+  return clusters.filter(g => g.length >= 2);
 }
 
 /** Union-find single-linkage clustering from pair edges. */
@@ -738,7 +818,8 @@ export async function buildSimilarGroups(opts) {
   const edgeMap = new Map();
   confirmed.forEach(p => edgeMap.set(pairKey(p.i, p.j), p));
 
-  const clusterIndices = clusterFromPairs(n, confirmed, cfg.maxGroupSize);
+  const clusterFn = mode === 'near' ? clusterCompleteLinkageFromPairs : clusterFromPairs;
+  const clusterIndices = clusterFn(n, confirmed, cfg.maxGroupSize);
   const groups = clusterIndices.map((indices, gi) => {
     const groupItems = indices.map(i => items[i]);
     const sorted = [...groupItems].sort((a, b) => {
@@ -783,6 +864,8 @@ export async function buildSimilarGroups(opts) {
       threshold: thresh,
       clipAvailable: hasClip,
       clipHost: workerHost,
+      clipError: lastClipError,
+      phashFailed: items.filter(i => !i.phash).length,
       confirmedPairs: confirmed.length,
       suspectPairs: suspects.length
     }

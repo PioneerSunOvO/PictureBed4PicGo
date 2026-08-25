@@ -13,7 +13,7 @@ const URLS = [
 ];
 
 const NEAR = {
-  phashMax: 10,
+  phashMax: 8,
   clipGrayMin: 0.94,
   clipHigh: 0.97,
   ssim: 0.85
