@@ -52,6 +52,8 @@
   let similarMode = 'near';
   const collapsedGroups = new Set();
   const CLIP_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']);
+  /** Bump when clip-embed / clip-worker change, to bust browser module cache. */
+  const ASSET_VERSION = '7998b94b';
   /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
   let repoHeadCommit = null;
 
@@ -510,7 +512,7 @@
   }
 
   async function getClipModule() {
-    if (!clipModule) clipModule = await import('./clip-embed.js');
+    if (!clipModule) clipModule = await import('./clip-embed.js?v=' + ASSET_VERSION);
     return clipModule;
   }
 
