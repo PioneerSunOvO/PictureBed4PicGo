@@ -69,6 +69,92 @@ export function clearMemCache() {
   memCache.clear();
 }
 
+function isCurrentCacheRecord(rec) {
+  if (!rec) return false;
+  if (rec.version != null || rec.model != null) {
+    return rec.version === CACHE_VERSION && rec.model === MODEL_ID;
+  }
+  // Legacy rows without version/model: require current version marker in key.
+  const key = String(rec.key || '');
+  return key.includes('::v' + CACHE_VERSION + '::') && key.startsWith(MODEL_ID + '::');
+}
+
+/**
+ * Delete IndexedDB rows that do not match current MODEL_ID + CACHE_VERSION.
+ * Safe to call on every page open.
+ * @returns {{ scanned: number, removed: number }}
+ */
+export async function purgeStaleCache() {
+  memCache.clear();
+  try {
+    const db = await openDb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      const store = tx.objectStore(STORE);
+      const req = store.openCursor();
+      let scanned = 0;
+      let removed = 0;
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return;
+        scanned++;
+        const rec = cursor.value;
+        if (!isCurrentCacheRecord(rec)) {
+          cursor.delete();
+          removed++;
+        }
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error);
+      tx.oncomplete = () => resolve({ scanned, removed });
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (_) {
+    return { scanned: 0, removed: 0 };
+  }
+}
+
+/**
+ * Wipe all CLIP embedding cache (IndexedDB + memory).
+ * @returns {{ cleared: number }}
+ */
+export async function clearAllCache() {
+  memCache.clear();
+  try {
+    const db = await openDb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      const store = tx.objectStore(STORE);
+      let cleared = 0;
+      const countReq = store.count();
+      countReq.onsuccess = () => {
+        cleared = countReq.result || 0;
+        store.clear();
+      };
+      countReq.onerror = () => reject(countReq.error);
+      tx.oncomplete = () => resolve({ cleared });
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (_) {
+    return { cleared: 0 };
+  }
+}
+
+/** Approximate entry count for UI hints. */
+export async function cacheStats() {
+  try {
+    const db = await openDb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readonly');
+      const req = tx.objectStore(STORE).count();
+      req.onsuccess = () => resolve({ count: req.result || 0 });
+      req.onerror = () => reject(req.error);
+    });
+  } catch (_) {
+    return { count: 0 };
+  }
+}
+
 export function cacheKeyFor(item, repoHead) {
   if (item?.blobSha) return MODEL_ID + '::v' + CACHE_VERSION + '::' + item.blobSha;
   const rel = item?.newRel ? item.newRel : String(item || '');

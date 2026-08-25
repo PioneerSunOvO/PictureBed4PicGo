@@ -511,6 +511,42 @@
     return clipModule;
   }
 
+  function stripItemEmbeddings() {
+    ITEMS.forEach(item => {
+      delete item.embedding;
+      delete item.embeddingKey;
+      delete item.simToKeep;
+      delete item.ssimToKeep;
+    });
+  }
+
+  async function clearClipCache() {
+    if (!confirm('清除本机全部 CLIP 向量缓存？下次相似扫描需重新计算。')) return;
+    try {
+      const clip = await getClipModule();
+      const { cleared } = await clip.clearAllCache();
+      stripItemEmbeddings();
+      similarScanned = false;
+      similarSets = [];
+      autoSmartSelected = false;
+      const el = document.getElementById('similarCount');
+      if (el) el.textContent = '0';
+      setStatus('已清除 ' + cleared + ' 条向量缓存', 'ok');
+      if (category === 'similar') scanSimilarImages(true);
+      else filter();
+    } catch (e) {
+      setStatus('清除缓存失败: ' + e.message, 'err');
+    }
+  }
+
+  async function purgeStaleClipCache() {
+    try {
+      const clip = await getClipModule();
+      const { removed } = await clip.purgeStaleCache();
+      if (removed > 0) setStatus('已清理 ' + removed + ' 条过期向量缓存', 'ok');
+    } catch (_) { /* ignore */ }
+  }
+
   function sortItemsByDate(items) {
     return [...items].sort((a, b) => {
       const da = a.date ? a.date.getTime() : 0;
@@ -1060,6 +1096,7 @@
       const curPct = Math.round(similarThreshold * 100);
       html += '<label class="thresh-label">阈值 <input type="range" id="similarThreshold" min="' + minPct + '" max="' + maxPct + '" value="' + curPct + '"> <span id="thresholdVal">' + curPct + '</span>%</label>';
       html += '<button type="button" data-dup-action="rescan">重新扫描</button>';
+      html += '<button type="button" data-dup-action="clear-cache" title="清除本机 IndexedDB 中的 CLIP 向量缓存">清除向量缓存</button>';
     }
     html += '</div></div>';
 
@@ -1660,6 +1697,8 @@
           similarScanned = false;
           autoSmartSelected = false;
           scanSimilarImages(true);
+        } else if (action === 'clear-cache') {
+          clearClipCache();
         }
         return;
       }
@@ -1851,6 +1890,7 @@
     updateCategoryCounts();
     bindEvents();
     showAuthUI();
+    purgeStaleClipCache();
 
     try { await handleCallbackOnInit(); } catch (e) {
       setStatus('GitHub 登录失败: ' + e.message, 'err');
