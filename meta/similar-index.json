@@ -1,10 +1,10 @@
 {
   "algoVersion": 1,
-  "generatedAt": "2026-08-25T08:27:06Z",
+  "generatedAt": "2026-08-25T08:48:22Z",
   "imageCount": 129,
-  "clipStatus": "skipped",
+  "clipStatus": "failed",
   "clipModel": null,
-  "clipError": null,
+  "clipError": "'BaseModelOutputWithPooling' object has no attribute 'norm'",
   "groups": [
     {
       "id": "near-1",
