@@ -1,0 +1,4 @@
+User-agent: *
+Disallow: /gallery.html
+Disallow: /gallery-app.js
+Disallow: /meta/

@@ -51,11 +51,67 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'lb-backdrop-5';
+  const ASSET_VERSION = 'security-1';
+  const PUBLIC_PREFIX = 'images/';
+  const PRIVATE_PREFIX = 'private/';
   const ACTIONS_SIMILAR_URL =
     'https://github.com/PioneerSunOvO/PictureBed4PicGo/actions/workflows/similar-index.yml';
   /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
   let repoHeadCommit = null;
+  /** rel -> { url, expMs, revoke? } */
+  const privateUrlCache = new Map();
+
+  function securityCfg() { return global.SECURITY || {}; }
+  function requireGalleryLogin() { return securityCfg().requireLogin !== false; }
+  function isPrivateRel(rel) { return !!rel && rel.startsWith(PRIVATE_PREFIX); }
+  function relPrefix(rel) { return isPrivateRel(rel) ? PRIVATE_PREFIX : PUBLIC_PREFIX; }
+
+  function clearPrivateUrlCache() {
+    privateUrlCache.forEach(entry => {
+      if (entry.revoke) URL.revokeObjectURL(entry.url);
+    });
+    privateUrlCache.clear();
+  }
+
+  function metaContentType(name) {
+    const ext = extOf(name);
+    const map = {
+      png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+      webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', ico: 'image/x-icon',
+      avif: 'image/avif', mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
+      mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', pdf: 'application/pdf'
+    };
+    return map[ext] || 'application/octet-stream';
+  }
+
+  async function verifyGalleryAccess() {
+    const allowed = securityCfg().allowedLogins;
+    if (!Array.isArray(allowed) || !allowed.length) return true;
+    const login = sessionStorage.getItem(AUTH_USER_KEY);
+    return !!login && allowed.includes(login);
+  }
+
+  function updateLoginGate() {
+    const gate = document.getElementById('loginGate');
+    const shell = document.getElementById('appShell');
+    const need = requireGalleryLogin() && !token();
+    if (gate) gate.classList.toggle('hidden', !need);
+    if (shell) shell.classList.toggle('gated', need);
+  }
+
+  function renderLoginGate() {
+    const container = document.getElementById('mediaContainer');
+    if (!container) return;
+    container.innerHTML =
+      '<div class="login-gate-panel">' +
+      '<div class="login-gate-icon">🔒</div>' +
+      '<h2>登录后查看图库</h2>' +
+      '<p>为保护隐私，文件列表与相似索引仅对已授权 GitHub 账号开放。<br>公开 Markdown 中的 <code>images/</code> 外链不受影响。</p>' +
+      '<p class="login-gate-hint">请在左侧使用 <strong>GitHub 登录</strong>。</p>' +
+      '</div>';
+    const stats = document.getElementById('stats');
+    if (stats) stats.textContent = '';
+  }
 
   /** Lightbox / compare state */
   let lbMode = 'single'; // single | compare
@@ -368,7 +424,13 @@
       sessionStorage.removeItem(AUTH_AVATAR_KEY);
     }
     showAuthUI();
-    filter();
+    updateLoginGate();
+    if (!(await verifyGalleryAccess())) {
+      sessionStorage.removeItem(TOKEN_KEY);
+      throw new Error('此 GitHub 账号无权访问图库');
+    }
+    if (location.protocol !== 'file:') await refreshFromGitHub(true);
+    await filter();
   }
 
   async function handleOAuthReturn() {
@@ -488,14 +550,21 @@
     sessionStorage.removeItem(AUTH_AVATAR_KEY);
     sessionStorage.removeItem(OAUTH_STATE_KEY);
     sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
+    clearPrivateUrlCache();
     selected.clear();
     detailItem = null;
+    ITEMS = [];
+    similarLoaded = false;
+    similarSets = [];
+    suspectSets = [];
+    similarIndexRaw = null;
     closeDetail();
     const pat = document.getElementById('pat');
     if (pat) pat.value = '';
     updateSiteBranding(null, REPO.owner);
     showAuthUI();
-    filter();
+    updateLoginGate();
+    void filter();
     setStatus('已退出', 'ok');
   }
 
@@ -552,7 +621,11 @@
   }
 
   function itemByFileName(file) {
-    const rel = file.startsWith('images/') ? file : 'images/' + file;
+    const rel = file.includes('/')
+      ? file
+      : (ITEMS.find(i => i.name === file && i.isPrivate)
+        ? PRIVATE_PREFIX + file
+        : PUBLIC_PREFIX + file);
     return itemByRel(rel) || ITEMS.find(i => i.name === file || i.name === rel.split('/').pop());
   }
 
@@ -638,6 +711,17 @@
   }
 
   async function fetchSimilarIndexJson() {
+    if (token()) {
+      try {
+        const meta = await ghFetch('/contents/meta/similar-index.json?ref=' + REPO.branch);
+        if (meta && meta.content) {
+          return JSON.parse(atob(meta.content.replace(/\s/g, '')));
+        }
+      } catch (_) { /* fallback below */ }
+    }
+    if (requireGalleryLogin() && !token()) {
+      throw new Error('需要登录后加载相似索引');
+    }
     let lastErr = null;
     for (const url of similarIndexUrls()) {
       try {
@@ -652,6 +736,7 @@
   }
 
   async function loadSimilarIndex(force) {
+    if (requireGalleryLogin() && !token()) return;
     if (similarLoading) return;
     if (similarLoaded && !force) return;
     similarLoading = true;
@@ -682,7 +767,7 @@
     }
     similarLoading = false;
     autoSmartSelected = false;
-    if (category === 'similar') filter();
+    if (category === 'similar') void filter();
   }
 
   function smartSelectGroups(sets, replace) {
@@ -718,27 +803,34 @@
   }
 
   function updateCategoryCounts() {
-    const counts = { all: ITEMS.length, image: 0, video: 0, audio: 0, document: 0, text: 0, other: 0 };
-    ITEMS.forEach(i => { if (counts[i.kind] !== undefined) counts[i.kind]++; });
+    const counts = { all: ITEMS.length, vault: 0, image: 0, video: 0, audio: 0, document: 0, text: 0, other: 0 };
+    ITEMS.forEach(i => {
+      if (i.isPrivate) { counts.vault++; return; }
+      if (counts[i.kind] !== undefined) counts[i.kind]++;
+    });
     Object.keys(counts).forEach(k => {
       const el = document.getElementById('cnt' + k.charAt(0).toUpperCase() + k.slice(1));
       if (el) el.textContent = String(counts[k]);
     });
   }
 
-  function buildItem(name, oldRel) {
-    const rel = 'images/' + name;
-    const enc = encodePath(rel);
+  function buildItemFromPath(fullPath, oldRel) {
+    const isPrivate = isPrivateRel(fullPath);
+    const prefix = isPrivate ? PRIVATE_PREFIX : PUBLIC_PREFIX;
+    if (!fullPath.startsWith(prefix)) throw new Error('invalid media path: ' + fullPath);
+    const name = fullPath.slice(prefix.length);
+    const enc = encodePath(fullPath);
     const hash = extractHash(name);
     const kind = fileKind(name);
-    const mappedOld = oldRel || OLD_MAP[rel] || '';
-    const resolved = resolveItemDate(name, rel, mappedOld);
+    const mappedOld = oldRel || OLD_MAP[fullPath] || '';
+    const resolved = resolveItemDate(name, fullPath, mappedOld);
     const date = resolved ? resolved.date : null;
     const pin = repoHeadCommit || REPO.branch;
     return {
       name,
-      newRel: rel,
+      newRel: fullPath,
       oldRel: mappedOld,
+      isPrivate,
       hash,
       kind,
       ext: extOf(name),
@@ -747,9 +839,13 @@
       dateSource: resolved ? resolved.source : '',
       dupCount: 0,
       rev: 0,
-      cdn: 'https://cdn.jsdelivr.net/gh/' + REPO.owner + '/' + REPO.repo + '@' + pin + '/' + enc,
-      raw: 'https://raw.githubusercontent.com/' + REPO.owner + '/' + REPO.repo + '/' + pin + '/' + enc
+      cdn: isPrivate ? '' : 'https://cdn.jsdelivr.net/gh/' + REPO.owner + '/' + REPO.repo + '@' + pin + '/' + enc,
+      raw: isPrivate ? '' : 'https://raw.githubusercontent.com/' + REPO.owner + '/' + REPO.repo + '/' + pin + '/' + enc
     };
+  }
+
+  function buildItem(name, oldRel) {
+    return buildItemFromPath(PUBLIC_PREFIX + name, oldRel);
   }
 
   async function enrichDatesFromGit(items) {
@@ -803,9 +899,11 @@
   }
 
   async function fetchRemotePaths() {
+    const prefixes = [PUBLIC_PREFIX];
+    if (token()) prefixes.push(PRIVATE_PREFIX);
     const data = await ghFetch('/git/trees/' + REPO.branch + '?recursive=1');
     return (data.tree || [])
-      .filter(t => t.type === 'blob' && t.path.startsWith('images/'))
+      .filter(t => t.type === 'blob' && prefixes.some(p => t.path.startsWith(p)))
       .map(t => ({ path: t.path, sha: t.sha }))
       .sort((a, b) => a.path.localeCompare(b.path));
   }
@@ -925,13 +1023,62 @@
   function urlsFor(item) {
     const primary = srcOf(item);
     const urls = [primary];
-    if (primary.includes('cdn.jsdelivr.net/gh/')) {
+    if (!item.isPrivate && primary.includes('cdn.jsdelivr.net/gh/')) {
       urls.push(primary.replace('cdn.jsdelivr.net/gh/', 'raw.githubusercontent.com/').replace(/@[a-f0-9]{40}\//, '/master/'));
     }
-    return urls;
+    return urls.filter(Boolean);
+  }
+
+  async function privateBlobUrl(item) {
+    const cached = privateUrlCache.get(item.newRel);
+    if (cached && cached.expMs > Date.now() + 60000) return cached.url;
+    const meta = await ghFetch('/contents/' + encodePath(item.newRel) + '?ref=' + REPO.branch);
+    if (!meta || !meta.content) throw new Error('无法读取私有文件');
+    const bin = atob(meta.content.replace(/\s/g, ''));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const blob = new Blob([bytes], { type: metaContentType(item.name) });
+    const url = URL.createObjectURL(blob);
+    privateUrlCache.set(item.newRel, { url, expMs: Date.now() + 3600000, revoke: true });
+    return url;
+  }
+
+  async function ensurePrivateUrl(item) {
+    if (!item || !item.isPrivate) return srcOf(item);
+    const cached = privateUrlCache.get(item.newRel);
+    if (cached && cached.expMs > Date.now() + 60000) return cached.url;
+    const base = String(securityCfg().privateProxyBase || '').replace(/\/$/, '');
+    if (base) {
+      const t = token();
+      if (!t) throw new Error('需要登录');
+      const res = await fetch(base + '/sign', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + t,
+          Accept: 'application/json'
+        },
+        body: JSON.stringify({ path: item.newRel })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '私有资源签名失败');
+      privateUrlCache.set(item.newRel, { url: data.url, expMs: (data.exp || 0) * 1000 });
+      return data.url;
+    }
+    return privateBlobUrl(item);
+  }
+
+  async function ensurePrivateUrls(items) {
+    const priv = (items || []).filter(i => i && i.isPrivate);
+    if (!priv.length) return;
+    await Promise.all(priv.map(i => ensurePrivateUrl(i).catch(() => '')));
   }
 
   function srcOf(item) {
+    if (item.isPrivate) {
+      const cached = privateUrlCache.get(item.newRel);
+      return cached ? cached.url : '';
+    }
     const source = document.getElementById('source');
     const enc = encodePath(item.newRel);
     const pin = mediaPin(item);
@@ -939,13 +1086,25 @@
     if (source.value === 'raw') {
       url = 'https://raw.githubusercontent.com/' + REPO.owner + '/' + REPO.repo + '/' + pin + '/' + enc;
     } else if (source.value === 'local') {
-      url = 'images/' + item.name;
+      url = item.newRel;
     } else {
       url = 'https://cdn.jsdelivr.net/gh/' + REPO.owner + '/' + REPO.repo + '@' + pin + '/' + enc;
     }
     const bust = item.rev || (item.blobSha ? item.blobSha.slice(0, 8) : '');
     if (bust) url += (url.includes('?') ? '&' : '?') + 'v=' + bust;
     return url;
+  }
+
+  function privateBadgeHtml() {
+    return '<span class="private-badge" title="私有文件，不可用于 Markdown 外链">私有</span>';
+  }
+
+  function canCopyPublicUrl(item) {
+    if (!item || item.isPrivate) {
+      setStatus('私有文件不可复制公开外链 / Markdown', 'err');
+      return false;
+    }
+    return true;
   }
 
   function escapeHtml(s) {
@@ -1031,6 +1190,7 @@
       html += '<input type="checkbox" class="card-check"' + (sel ? ' checked' : '') + '>';
     }
     if (isDup && !isKeep) html += '<span class="badge">重复 ×' + item.dupCount + '</span>';
+    if (item.isPrivate) html += privateBadgeHtml();
     if (group.type === 'similar' && !isKeep && item.simToKeep != null) {
       const label = formatSimPct(item.simToKeep);
       const pct = Math.round(Math.max(0, Math.min(1, item.simToKeep)) * 100);
@@ -1202,6 +1362,7 @@
           html += '<input type="checkbox" class="card-check"' + (sel ? ' checked' : '') + '>';
         }
         if (isDup) html += '<span class="badge">重复 ×' + item.dupCount + '</span>';
+        if (item.isPrivate) html += privateBadgeHtml();
         if (item.kind !== 'image') html += '<span class="type-badge">' + escapeHtml(item.ext) + '</span>';
         html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
         html += '<div class="card-hover">';
@@ -1226,7 +1387,9 @@
       const sel = selected.has(item.newRel);
       html += '<div class="list-row' + (sel ? ' selected' : '') + '" data-rel="' + escapeAttr(item.newRel) + '">';
       html += '<div class="list-thumb">' + thumbHtml(item, url, true) + '</div>';
-      html += '<div class="list-info"><div class="name">' + escapeHtml(item.name) + '</div>';
+      html += '<div class="list-info"><div class="name">' + escapeHtml(item.name);
+      if (item.isPrivate) html += ' ' + privateBadgeHtml();
+      html += '</div>';
       html += '<div class="sub">' + escapeHtml(item.kind) + (item.dateStr ? ' · ' + item.dateStr : '') + '</div></div>';
       html += '<div class="list-actions">';
       html += '<button type="button" data-action="copy-url">链接</button>';
@@ -1242,7 +1405,7 @@
     return html;
   }
 
-  function render(list) {
+  async function render(list) {
     const container = document.getElementById('mediaContainer');
     const stats = document.getElementById('stats');
     if (!container) return;
@@ -1256,7 +1419,7 @@
 
       if (mode === 'similar' && !similarLoaded && !similarLoading) {
         container.innerHTML = '<div class="scan-progress"><div>加载相似索引…</div></div>';
-        loadSimilarIndex(false);
+        void loadSimilarIndex(false);
         return;
       }
       if (mode === 'similar' && similarLoading) return;
@@ -1271,6 +1434,7 @@
         stats.innerHTML = statHtml;
       }
 
+      await ensurePrivateUrls(filtered);
       container.innerHTML = renderDupGroups(sets, mode);
 
       updateSelUI();
@@ -1283,23 +1447,40 @@
     }
 
     if (!list.length) {
-      container.innerHTML = '<div class="empty">没有匹配结果</div>';
+      container.innerHTML = '<div class="empty">' +
+        (category === 'vault' ? '暂无私有文件 · 将敏感图放入仓库 private/ 目录' : '没有匹配结果') +
+        '</div>';
       updateSelUI();
       return;
+    }
+
+    const priv = list.filter(i => i.isPrivate);
+    if (priv.length) {
+      container.innerHTML = '<div class="scan-progress"><div>加载私密资源…</div></div>';
+      await ensurePrivateUrls(priv);
     }
 
     container.innerHTML = viewMode === 'list' ? renderList(list) : renderGrid(list);
     updateSelUI();
   }
 
-  function filter() {
+  async function filter() {
+    updateLoginGate();
+    if (requireGalleryLogin() && !token()) {
+      renderLoginGate();
+      return;
+    }
     const kw = (document.getElementById('q').value || '').trim().toLowerCase();
     let list = ITEMS;
     if (category === 'dup' || category === 'similar') {
-      render([]);
+      await render([]);
       return;
     }
-    if (category !== 'all') list = list.filter(i => i.kind === category);
+    if (category === 'vault') {
+      list = list.filter(i => i.isPrivate);
+    } else if (category !== 'all') {
+      list = list.filter(i => !i.isPrivate && i.kind === category);
+    }
     if (kw) {
       list = list.filter(i =>
         i.name.toLowerCase().includes(kw) ||
@@ -1310,7 +1491,7 @@
         i.ext.includes(kw)
       );
     }
-    render(sortList(list));
+    await render(sortList(list));
   }
 
   function itemByRel(rel) {
@@ -1324,7 +1505,8 @@
     return (n / 1048576).toFixed(2) + ' MB';
   }
 
-  function openDetail(item) {
+  async function openDetail(item) {
+    if (item.isPrivate) await ensurePrivateUrl(item);
     detailItem = item;
     document.getElementById('appShell').classList.add('detail-open');
     const url = srcOf(item);
@@ -1348,11 +1530,15 @@
 
     const rows = [
       ['文件名', item.name],
+      ['可见性', item.isPrivate ? '私有（不可用于 Markdown）' : '公开（可用于 Markdown）'],
       ['类型', item.kind + ' (.' + item.ext + ')'],
-      ['路径', item.newRel],
-      ['CDN', item.cdn],
-      ['Raw', item.raw]
+      ['路径', item.newRel]
     ];
+    if (!item.isPrivate) {
+      rows.push(['CDN', item.cdn], ['Raw', item.raw]);
+    } else {
+      rows.push(['访问', securityCfg().privateProxyBase ? '私有代理（签名 URL）' : 'GitHub API（登录后）']);
+    }
     if (item.oldRel) rows.push(['旧路径', item.oldRel]);
     if (item.hash) rows.push(['Hash', item.hash]);
     if (item.blobSha) rows.push(['Blob', item.blobSha]);
@@ -1369,7 +1555,9 @@
 
     const hasToken = !!token();
     actions.innerHTML =
-      '<button type="button" class="primary" data-action="copy-url">复制链接</button>' +
+      (item.isPrivate
+        ? '<button type="button" class="primary" disabled title="私有文件不可复制公开外链">复制链接</button>'
+        : '<button type="button" class="primary" data-action="copy-url">复制链接</button>') +
       '<button type="button" data-action="copy-name">复制文件名</button>' +
       '<button type="button" data-action="fullscreen">全屏预览</button>' +
       '<a href="' + escapeAttr(url) + '" target="_blank" rel="noopener">新窗口</a>' +
@@ -1635,24 +1823,27 @@
     addBtn('复位缩放', '', () => lbZoomControllers.forEach(c => c.reset && c.reset()));
 
     if (active) {
-      addBtn('复制链接', '', () => {
-        navigator.clipboard.writeText(activeUrl);
-        setStatus('已复制链接', 'ok');
-      });
+      if (!active.isPrivate) {
+        addBtn('复制链接', '', () => {
+          navigator.clipboard.writeText(activeUrl);
+          setStatus('已复制链接', 'ok');
+        });
+        addBtn('复制 Markdown', '', () => {
+          navigator.clipboard.writeText('![' + active.name + '](' + activeUrl + ')');
+          setStatus('已复制 Markdown', 'ok');
+        });
+      }
       addBtn('复制文件名', '', () => {
         navigator.clipboard.writeText(active.name);
         setStatus('已复制文件名', 'ok');
       });
-      addBtn('复制 Markdown', '', () => {
-        navigator.clipboard.writeText('![' + active.name + '](' + activeUrl + ')');
-        setStatus('已复制 Markdown', 'ok');
-      });
       addBtn('新窗口', '', () => {
+        if (!activeUrl) { setStatus('私有资源未就绪', 'err'); return; }
         window.open(activeUrl, '_blank', 'noopener');
       });
       addBtn('详情', '', () => {
         closeLightbox();
-        openDetail(active);
+        void openDetail(active);
       });
       if (hasToken && lbMode === 'single') {
         addBtn('重命名', '', () => {
@@ -1668,7 +1859,7 @@
             .then(() => {
               if (lbMode === 'compare') closeLightbox();
               else {
-                filter();
+                void filter();
                 if (!filtered.length) closeLightbox();
                 else {
                   lightboxIdx = Math.min(lightboxIdx, filtered.length - 1);
@@ -1737,6 +1928,7 @@
     }
 
     if (lbMode === 'compare' && lbCompareLeft && lbCompareRight) {
+      await ensurePrivateUrls([lbCompareLeft, lbCompareRight]);
       const leftPane = buildLbPane(lbCompareLeft, '左');
       const rightPane = buildLbPane(lbCompareRight, '右');
       renderCompareThumbs(rightPane);
@@ -1748,6 +1940,7 @@
         closeLightbox();
         return;
       }
+      if (item.isPrivate) await ensurePrivateUrl(item);
       view.appendChild(buildLbPane(item, null));
     }
     renderLbToolbar();
@@ -1765,7 +1958,7 @@
       lightboxIdx = 0;
     }
     document.getElementById('lightbox').classList.add('open');
-    renderLightboxStage();
+    void renderLightboxStage();
   }
 
   function openLightboxFullscreen(item) {
@@ -1841,6 +2034,7 @@
     const url = srcOf(item);
 
     if (action === 'copy-url') {
+      if (!canCopyPublicUrl(item)) return;
       navigator.clipboard.writeText(url);
       setStatus('已复制链接', 'ok');
     } else if (action === 'copy-name') {
@@ -1853,17 +2047,18 @@
     } else if (action === 'delete') {
       deleteOne(rel).catch(err => setStatus('删除失败: ' + err.message, 'err'));
     } else if (action === 'rename') {
-      const cur = rel.slice(7);
-      const newName = prompt('新文件名（images/ 下）', cur);
+      const prefix = relPrefix(rel);
+      const cur = rel.slice(prefix.length);
+      const newName = prompt('新文件名（' + prefix + ' 下）', cur);
       if (!newName || newName === cur) return;
       setStatus('重命名中…');
       const wasOpen = document.getElementById('lightbox')?.classList.contains('open');
       renameFile(rel, newName)
         .then(() => {
-          filter();
+          void filter();
           setStatus('重命名成功', 'ok');
           if (wasOpen) {
-            const next = itemByRel('images/' + newName.replace(/^images\//, ''));
+            const next = itemByRel(prefix + newName.replace(/^(images|private)\//, ''));
             if (next) openLightbox(next, lbFullscreen);
             else closeLightbox();
           }
@@ -1878,6 +2073,13 @@
   }
 
   async function refreshFromGitHub(silent) {
+    if (requireGalleryLogin() && !token()) {
+      ITEMS = [];
+      updateCategoryCounts();
+      void filter();
+      if (!silent) setStatus('请先登录以同步图库', 'err');
+      return;
+    }
     const prev = ITEMS.length;
     if (!silent) setStatus('正在从 GitHub 同步…');
     try {
@@ -1886,7 +2088,7 @@
       const paths = await fetchRemotePaths();
       const prevMeta = new Map(ITEMS.map(i => [i.newRel, i]));
       ITEMS = paths.map(p => {
-        const item = buildItem(p.path.slice(7), OLD_MAP[p.path]);
+        const item = buildItemFromPath(p.path, OLD_MAP[p.path]);
         item.blobSha = p.sha;
         const old = prevMeta.get(item.newRel);
         if (old && old.rev) item.rev = old.rev;
@@ -1909,23 +2111,24 @@
       rebuildDupIndex();
       updateCategoryCounts();
       selected.clear();
-      filter();
+      await filter();
       if (!silent) setStatus('已同步 ' + ITEMS.length + ' 个文件', 'ok');
       else if (prev !== ITEMS.length) setStatus('已自动同步 ' + ITEMS.length + ' 个文件', 'ok');
       else setStatus('');
     } catch (e) {
       rebuildDupIndex();
       updateCategoryCounts();
-      filter();
+      await filter();
       if (ITEMS.length) setStatus('在线同步失败，显示缓存 ' + ITEMS.length + ' 个', 'err');
       else setStatus('加载失败: ' + e.message, 'err');
     }
   }
 
   async function renameFile(oldRel, newName) {
-    newName = newName.trim().replace(/^images\//, '').replace(/\\/g, '/');
+    const prefix = relPrefix(oldRel);
+    newName = newName.trim().replace(/^(images|private)\//, '').replace(/\\/g, '/');
     if (!newName || newName.includes('/')) throw new Error('新文件名无效');
-    const newRel = 'images/' + newName;
+    const newRel = prefix + newName;
     if (newRel === oldRel) return;
     const meta = await getFileMeta(oldRel);
     await putFile(newRel, meta.content, null, 'gallery: rename to ' + newRel);
@@ -1940,7 +2143,7 @@
     const prev = ITEMS.find(i => i.newRel === oldRel);
     const idx = ITEMS.findIndex(i => i.newRel === oldRel);
     if (idx >= 0) {
-      ITEMS[idx] = buildItem(newName, OLD_MAP[newRel]);
+      ITEMS[idx] = buildItemFromPath(newRel, OLD_MAP[newRel]);
       if (!ITEMS[idx].date && prev && prev.date) {
         ITEMS[idx].date = prev.date;
         ITEMS[idx].dateStr = prev.dateStr;
@@ -1959,11 +2162,11 @@
     const newSha = result && result.content && result.content.sha;
     const commitSha = result && result.commitSha;
     bumpRepoHead(commitSha);
-    const name = rel.slice(7);
+    const name = rel.slice(relPrefix(rel).length);
     const idx = ITEMS.findIndex(i => i.newRel === rel);
     if (idx >= 0) {
       const oldRel = ITEMS[idx].oldRel;
-      ITEMS[idx] = buildItem(name, oldRel);
+      ITEMS[idx] = buildItemFromPath(rel, oldRel);
       ITEMS[idx].blobSha = newSha;
       ITEMS[idx].commitSha = commitSha;
       ITEMS[idx].rev = Date.now();
@@ -1995,8 +2198,8 @@
     selected.delete(rel);
     if (detailItem && detailItem.newRel === rel) closeDetail();
     rebuildDupIndex();
-    filter();
-    setStatus('已删除 ' + rel.slice(7), 'ok');
+    void filter();
+    setStatus('已删除 ' + rel.slice(relPrefix(rel).length), 'ok');
     return true;
   }
 
@@ -2026,7 +2229,7 @@
       }
     }
     rebuildDupIndex();
-    filter();
+    void filter();
     setStatus(ok === rels.length ? '已删除 ' + ok + ' 个文件' : '部分完成 ' + ok + '/' + rels.length,
       ok === rels.length ? 'ok' : 'err');
   }
@@ -2058,17 +2261,21 @@
       if (loggedRow) loggedRow.classList.add('hidden');
       updateSiteBranding(null, REPO.owner);
       if (st) {
-        st.textContent = oauthClientId()
-          ? '已登录 GitHub 时一键授权'
-          : '登录后可删除、重命名与替换';
+        st.textContent = requireGalleryLogin()
+          ? '登录后查看图库列表与私有文件'
+          : (oauthClientId() ? '已登录 GitHub 时一键授权' : '登录后可删除、重命名与替换');
       }
     }
+    updateLoginGate();
   }
 
   function bindEvents() {
-    document.getElementById('q').oninput = filter;
-    document.getElementById('source').onchange = () => { filter(); if (detailItem) openDetail(detailItem); };
-    document.getElementById('sort').onchange = e => { sortBy = e.target.value; filter(); };
+    document.getElementById('q').oninput = () => { void filter(); };
+    document.getElementById('source').onchange = () => {
+      void filter();
+      if (detailItem) void openDetail(detailItem);
+    };
+    document.getElementById('sort').onchange = e => { sortBy = e.target.value; void filter(); };
 
     if (location.protocol !== 'file:') {
       const localOpt = document.querySelector('#source option[value="local"]');
@@ -2082,7 +2289,7 @@
         category = next;
         document.querySelectorAll('.nav-item[data-cat]').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        filter();
+        void filter();
       };
     });
 
@@ -2090,13 +2297,13 @@
       viewMode = 'grid';
       document.getElementById('viewGrid').classList.add('active');
       document.getElementById('viewList').classList.remove('active');
-      filter();
+      void filter();
     };
     document.getElementById('viewList').onclick = () => {
       viewMode = 'list';
       document.getElementById('viewList').classList.add('active');
       document.getElementById('viewGrid').classList.remove('active');
-      filter();
+      void filter();
     };
 
     document.getElementById('mediaContainer').addEventListener('click', e => {
@@ -2110,11 +2317,11 @@
           const count = sets.reduce((n, g) => n + g.items.filter(i => i.newRel !== g.keepRel).length, 0);
           if (count && !confirm('将智能选中 ' + count + ' 张较旧副本（每组保留最新一张）。确认？')) return;
           smartSelectGroups(sets, true);
-          filter();
+          void filter();
         } else if (action === 'clear-select') {
           sets.forEach(g => g.items.forEach(i => selected.delete(i.newRel)));
           updateSelUI();
-          filter();
+          void filter();
         } else if (action === 'rescan') {
           autoSmartSelected = false;
           loadSimilarIndex(true);
@@ -2128,7 +2335,7 @@
       if (suspectHead) {
         e.stopPropagation();
         suspectExpanded = !suspectExpanded;
-        filter();
+        void filter();
         return;
       }
 
@@ -2137,7 +2344,7 @@
         const gid = toggleHead.dataset.groupToggle;
         if (collapsedGroups.has(gid)) collapsedGroups.delete(gid);
         else collapsedGroups.add(gid);
-        filter();
+        void filter();
         return;
       }
 
@@ -2160,7 +2367,7 @@
           g.items.forEach(i => selected.add(i.newRel));
           updateSelUI();
         }
-        filter();
+        void filter();
         return;
       }
 
@@ -2180,20 +2387,20 @@
       if (cb) {
         e.stopPropagation();
         toggleSelect(rel, cb.checked);
-        if (category === 'dup' || category === 'similar') filter();
+        if (category === 'dup' || category === 'similar') void filter();
         else card.classList.toggle('selected', cb.checked);
         return;
       }
 
       if (e.shiftKey || e.ctrlKey || e.metaKey) {
         toggleSelect(rel, !selected.has(rel));
-        filter();
+        void filter();
         return;
       }
 
       if (e.detail >= 2 && item) {
         focused = item.name;
-        openDetail(item);
+        void openDetail(item);
         return;
       }
 
@@ -2203,7 +2410,7 @@
       }
 
       focused = item.name;
-      openDetail(item);
+      void openDetail(item);
     });
 
     document.getElementById('detailClose').onclick = closeDetail;
@@ -2244,7 +2451,7 @@
     document.getElementById('savePat').onclick = () => {
       const v = (document.getElementById('pat').value || '').trim();
       if (!v) return alert('请输入 PAT');
-      saveToken(v).then(() => setStatus('PAT 已保存', 'ok'));
+      saveToken(v).then(() => setStatus('PAT 已保存', 'ok')).catch(e => setStatus(e.message, 'err'));
     };
     document.getElementById('clearPat').onclick = () => logout();
     document.getElementById('refreshList').onclick = () => refreshFromGitHub(false);
@@ -2253,7 +2460,7 @@
     document.getElementById('selectAll').onchange = e => {
       const on = e.target.checked;
       filtered.forEach(i => { if (on) selected.add(i.newRel); else selected.delete(i.newRel); });
-      filter();
+      void filter();
     };
 
     document.getElementById('batchDelete').onclick = () => batchDelete();
@@ -2276,7 +2483,7 @@
         autoSmartSelected = false;
         if (similarIndexRaw) {
           applySimilarIndex(similarIndexRaw);
-          filter();
+          void filter();
         } else {
           loadSimilarIndex(true);
         }
@@ -2295,11 +2502,11 @@
       try {
         const updated = await replaceFile(rel, file);
         bumpRepoHead(updated && updated.commitSha);
-        filter();
+        void filter();
         if (updated) {
           detailItem = itemByRel(rel) || updated;
           if (fromLightbox) openLightbox(detailItem, lbFullscreen);
-          else openDetail(detailItem);
+          else void openDetail(detailItem);
         }
         setStatus('替换成功 · ' + formatBytes(file.size), 'ok');
       } catch (e) {
@@ -2320,6 +2527,7 @@
   async function init(opts) {
     ITEMS = (opts.items || []).map(i => {
       if (i.kind !== undefined) return i;
+      if (i.newRel) return buildItemFromPath(i.newRel, i.oldRel);
       return buildItem(i.name, i.oldRel);
     });
     OLD_MAP = opts.oldMap || {};
@@ -2335,13 +2543,19 @@
     if (token() && !sessionStorage.getItem(AUTH_USER_KEY)) {
       try { await saveToken(token()); } catch (_) { /* ignore */ }
     } else if (token()) {
-      refreshUserProfile();
+      if (!(await verifyGalleryAccess())) {
+        logout();
+        setStatus('此 GitHub 账号无权访问图库', 'err');
+      } else {
+        refreshUserProfile();
+      }
     } else {
       updateSiteBranding(null, REPO.owner);
     }
 
-    filter();
-    if (location.protocol !== 'file:') refreshFromGitHub(true);
+    updateLoginGate();
+    await filter();
+    if (location.protocol !== 'file:') await refreshFromGitHub(true);
     else setStatus('本地 file 打开：请用 GitHub Pages 以自动同步');
   }
 

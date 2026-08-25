@@ -6,6 +6,17 @@ GitHub 图床 · 自动同步 · 重复与相似检测
 
 PicGo 配置：仓库 `PioneerSunOvO/PictureBed4PicGo`，分支 `master`，路径 `images/`
 
+## 安全与私有目录
+
+| 目录 | 用途 | Markdown |
+|------|------|----------|
+| `images/` | 公开图床（PicGo 默认） | ✅ jsDelivr / raw 直链 |
+| `private/` | 敏感图，仅 Gallery 管理 | ❌ 不提供公开外链 |
+
+- **登录门控：** Gallery 默认需 GitHub 登录后才加载文件列表（`gallery.html` → `SECURITY.requireLogin`）
+- **私有代理（C1）：** 部署 Cloudflare Worker 为 `private/` 签发短期签名 URL → [docs/private-proxy-setup.md](docs/private-proxy-setup.md)
+- **反爬：** `robots.txt` + `noindex` 元标签
+
 ## 相似检测（纯 GitHub）
 
 浏览器**不再**现场跑 CLIP。流程：

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PictureBed — GitHub 图床</title>
   <meta name="description" content="PictureBed4PicGo — GitHub 图床画廊，自动同步、重复检测与相似分析。">
+  <meta name="robots" content="noindex, nofollow, noarchive">
   <meta property="og:type" content="website">
   <meta property="og:title" content="PictureBed — GitHub 图床">
   <meta property="og:description" content="GitHub 图床画廊 · 自动同步 · 重复与相似检测">
@@ -1285,6 +1286,49 @@
     }
     .pat-toggle:hover { color: var(--text); }
 
+    .private-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 0.65rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      color: #7c3aed;
+      background: rgba(124, 58, 237, 0.12);
+      border: 1px solid rgba(124, 58, 237, 0.22);
+      vertical-align: middle;
+    }
+    .card .private-badge {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      z-index: 2;
+    }
+    .login-gate-panel {
+      max-width: 520px;
+      margin: 10vh auto 0;
+      padding: 36px 32px;
+      text-align: center;
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow);
+    }
+    .login-gate-panel h2 { margin: 0 0 12px; font-size: 1.35rem; }
+    .login-gate-panel p { margin: 0 0 12px; color: var(--muted); line-height: 1.6; }
+    .login-gate-panel code {
+      font-family: var(--mono);
+      font-size: 0.85em;
+      background: var(--bg-hover);
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+    .login-gate-icon { font-size: 2.4rem; margin-bottom: 8px; }
+    .login-gate-hint { font-size: 0.9rem; }
+    .app.gated .main { pointer-events: none; opacity: 0.45; filter: blur(1px); }
+    .app.gated .sidebar { opacity: 1; filter: none; pointer-events: auto; }
+
     @keyframes rise {
       from { opacity: 0; transform: translateY(6px); }
       to { opacity: 1; transform: none; }
@@ -1320,6 +1364,7 @@
         <button type="button" class="nav-item" data-cat="document"><span class="icon">📄</span>文档 <span class="count" id="cntDocument">0</span></button>
         <button type="button" class="nav-item" data-cat="text"><span class="icon">⌨</span>文本 <span class="count" id="cntText">0</span></button>
         <button type="button" class="nav-item" data-cat="other"><span class="icon">📦</span>其他 <span class="count" id="cntOther">0</span></button>
+        <button type="button" class="nav-item" data-cat="vault"><span class="icon">🔒</span>私有 <span class="count" id="cntVault">0</span></button>
         <div class="nav-section">工具</div>
         <button type="button" class="nav-item" data-cat="dup"><span class="icon">⚠</span>重复 <span class="count" id="dupCount">0</span></button>
         <button type="button" class="nav-item" data-cat="similar"><span class="icon">◎</span>相似 <span class="count" id="similarCount">0</span></button>
@@ -1334,7 +1379,7 @@
             <button type="button" id="refreshList" class="account-sync" style="border:1px solid var(--line);border-radius:10px;">
               <span class="ico">↻</span> 同步图库
             </button>
-            <p class="auth-hint" id="patStatus">登录后可删除、重命名与替换</p>
+            <p class="auth-hint" id="patStatus">登录后查看图库列表与私有文件</p>
             <button type="button" id="patToggle" class="pat-toggle">手动 PAT ▾</button>
           </div>
           <div class="hidden account-panel" id="loggedRow">
@@ -1437,8 +1482,17 @@
       redirectUri: 'https://pioneersunovo.github.io/PictureBed4PicGo/gallery.html',
       scope: 'repo'
     };
+  /** 安全：登录门控 + 私有目录代理（见 docs/private-proxy-setup.md） */
+    const SECURITY = {
+      /** 未登录不加载文件列表与相似索引 */
+      requireLogin: true,
+      /** Cloudflare Worker 根 URL，如 https://pb4pg-private.xxx.workers.dev；留空则用 GitHub API Blob（仅登录态） */
+      privateProxyBase: '',
+      /** 允许访问图库的 GitHub 用户名；留空 = 任意有仓库权限的登录用户 */
+      allowedLogins: []
+    };
   </script>
-  <script src="gallery-app.js?v=lb-backdrop-5"></script>
+  <script src="gallery-app.js?v=security-1"></script>
   <script>
     GalleryApp.init({ items: [], oldMap: {} });
   </script>

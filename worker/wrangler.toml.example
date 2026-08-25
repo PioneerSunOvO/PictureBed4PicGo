@@ -1,0 +1,16 @@
+name = "pb4pg-private-proxy"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# wrangler secret put PROXY_SECRET
+# wrangler secret put GITHUB_PAT
+
+[vars]
+REPO_OWNER = "PioneerSunOvO"
+REPO_NAME = "PictureBed4PicGo"
+REPO_BRANCH = "master"
+SIGN_TTL_SECONDS = "3600"
+# 逗号分隔，限制 Gallery 页面来源（建议填 GitHub Pages 域名）
+ALLOWED_ORIGIN = "https://pioneersunovo.github.io"
+# 逗号分隔 GitHub 用户名；留空则不限制
+ALLOWED_LOGINS = ""
