@@ -51,7 +51,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'security-1';
+  const ASSET_VERSION = 'security-2';
   const PUBLIC_PREFIX = 'images/';
   const PRIVATE_PREFIX = 'private/';
   const ACTIONS_SIMILAR_URL =
@@ -1667,8 +1667,10 @@
     }
 
     function onClick(e) {
-      // Prevent lightbox backdrop-close when interacting with the zoom surface.
-      e.stopPropagation();
+      // Only block backdrop-close when clicking the media itself (not empty .lb-zoom padding).
+      if (e.target === mediaEl || mediaEl.contains(e.target)) {
+        e.stopPropagation();
+      }
     }
 
     wrap.addEventListener('wheel', onWheel, { passive: false });
@@ -2422,10 +2424,8 @@
     });
 
     document.getElementById('lightbox').onclick = e => {
-      // Keep interactions on media / zoom surface / controls; close only on empty backdrop.
-      // .lb-zoom must be excluded: it fills the preview pane and receives pan/zoom clicks
-      // (often the target is the wrap, not the <img>), especially after scaling.
-      if (e.target.closest('.lb-zoom, img, video, audio, iframe, .lightbox-text')) return;
+      // Close on backdrop / empty zoom padding; keep media & controls interactive.
+      if (e.target.closest('img, video, audio, iframe, .lightbox-text')) return;
       if (e.target.closest('button, a, input, .lightbox-actions, .lightbox-caption, .lightbox-toolbar, .lb-thumbs, .lb-pane-label')) return;
       closeLightbox();
     };
