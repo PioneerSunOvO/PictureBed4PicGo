@@ -51,7 +51,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'security-2';
+  const ASSET_VERSION = 'security-3';
   const PUBLIC_PREFIX = 'images/';
   const PRIVATE_PREFIX = 'private/';
   const ACTIONS_SIMILAR_URL =
@@ -1583,8 +1583,13 @@
     let tx = 0;
     let ty = 0;
     let dragging = false;
+    let didPan = false;
+    let suppressClick = false;
     let lastX = 0;
     let lastY = 0;
+    let startX = 0;
+    let startY = 0;
+    let activePointerId = null;
 
     function apply() {
       mediaEl.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
@@ -1626,15 +1631,27 @@
     function onPointerDown(e) {
       if (mediaEl.tagName !== 'IMG' || scale <= 1) return;
       if (e.button != null && e.button !== 0) return;
+      // Only start pan when gesture begins on the media, not empty padding.
+      if (e.target !== mediaEl && !mediaEl.contains(e.target)) return;
       dragging = true;
-      lastX = e.clientX;
-      lastY = e.clientY;
-      wrap.setPointerCapture && wrap.setPointerCapture(e.pointerId);
+      didPan = false;
+      activePointerId = e.pointerId;
+      startX = lastX = e.clientX;
+      startY = lastY = e.clientY;
       apply();
     }
 
     function onPointerMove(e) {
       if (!dragging) return;
+      if (activePointerId != null && e.pointerId !== activePointerId) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!didPan && (dx * dx + dy * dy) > 9) {
+        didPan = true;
+        suppressClick = true;
+        try { wrap.setPointerCapture && wrap.setPointerCapture(e.pointerId); } catch (_) {}
+      }
+      if (!didPan) return;
       tx += e.clientX - lastX;
       ty += e.clientY - lastY;
       lastX = e.clientX;
@@ -1644,7 +1661,10 @@
 
     function onPointerUp(e) {
       if (!dragging) return;
+      if (activePointerId != null && e.pointerId !== activePointerId) return;
       dragging = false;
+      activePointerId = null;
+      if (didPan) suppressClick = true;
       try { wrap.releasePointerCapture && wrap.releasePointerCapture(e.pointerId); } catch (_) {}
       apply();
     }
@@ -1667,7 +1687,16 @@
     }
 
     function onClick(e) {
-      // Only block backdrop-close when clicking the media itself (not empty .lb-zoom padding).
+      // After pan, browser often fires click on .lb-zoom (not <img>) because of
+      // pointer capture — swallow that one click so lightbox does not close.
+      if (suppressClick) {
+        e.stopPropagation();
+        e.preventDefault();
+        suppressClick = false;
+        didPan = false;
+        return;
+      }
+      // Clicking the media itself must not close; empty .lb-zoom padding may close.
       if (e.target === mediaEl || mediaEl.contains(e.target)) {
         e.stopPropagation();
       }
