@@ -41,11 +41,14 @@
   const hashGroups = new Map();
   let exactSets = [];
   let similarSets = [];
+  let suspectSets = [];
+  let scanMeta = null;
+  let clipAvailable = false;
   let clipModule = null;
   let similarScanned = false;
   let similarScanning = false;
   let autoSmartSelected = false;
-  let similarThreshold = 0.98;
+  let similarThreshold = 0.94;
   let similarMode = 'near';
   const collapsedGroups = new Set();
   const CLIP_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']);
@@ -515,8 +518,11 @@
     ITEMS.forEach(item => {
       delete item.embedding;
       delete item.embeddingKey;
+      delete item.phash;
       delete item.simToKeep;
       delete item.ssimToKeep;
+      delete item.phashDistToKeep;
+      delete item.matchPath;
     });
   }
 
@@ -528,6 +534,8 @@
       stripItemEmbeddings();
       similarScanned = false;
       similarSets = [];
+      suspectSets = [];
+      scanMeta = null;
       autoSmartSelected = false;
       const el = document.getElementById('similarCount');
       if (el) el.textContent = '0';
@@ -593,67 +601,56 @@
     return Math.round(Math.max(0, Math.min(1, sim)) * 1000) / 10 + '%';
   }
 
-  async function buildSimilarSetsAsync() {
+  async function buildSimilarSetsAsync(onProgress) {
     const clip = await getClipModule();
-    const modeCfg = clip.getSimilarModeConfig(similarMode);
-    const images = ITEMS.filter(canClipEmbed).filter(i => i.embedding);
-    let clusters = clip.clusterCompleteLinkage(images, similarThreshold);
-    const refined = [];
-    for (const items of clusters) {
-      const sorted = sortItemsByDate(items);
-      const keep = sorted[sorted.length - 1];
-      let group = sorted;
-      if (modeCfg.ssim > 0) {
-        const after = await clip.refineGroupBySsim(
-          sorted,
-          keep.newRel,
-          (item) => srcOf(item),
-          modeCfg.ssim
-        );
-        if (after && after.length >= 2) group = sortItemsByDate(after);
-        else continue;
-      }
-      if (isExactOnlyGroup(group)) continue;
-      const stats = clip.groupStats(group, keep.newRel);
-      refined.push({
-        id: 'sim-' + keep.newRel.slice(7, 20),
-        type: 'similar',
-        items: group,
-        keepRel: keep.newRel,
-        avgSimilarity: stats.avg,
-        minSimilarity: stats.min,
-        maxSimilarity: stats.max
-      });
-    }
-    similarSets = refined.sort((a, b) => b.items.length - a.items.length);
+    const targets = ITEMS.filter(canClipEmbed);
+    const result = await clip.buildSimilarGroups({
+      items: targets,
+      mode: similarMode,
+      threshold: similarThreshold,
+      urlFor: (item) => srcOf(item),
+      clipAvailable,
+      onProgress
+    });
+    similarSets = result.groups.filter(g => !isExactOnlyGroup(g.items));
+    suspectSets = result.suspects || [];
+    scanMeta = result.meta;
     const el = document.getElementById('similarCount');
     if (el) el.textContent = String(similarSets.length);
+    return result;
   }
 
   function buildSimilarSets() {
     if (!clipModule) return;
-    const modeCfg = clipModule.getSimilarModeConfig(similarMode);
-    const images = ITEMS.filter(canClipEmbed).filter(i => i.embedding);
-    const clusters = clipModule.clusterCompleteLinkage(images, similarThreshold);
-    similarSets = clusters
-      .filter(g => !isExactOnlyGroup(g))
-      .map((items) => {
-        const sorted = sortItemsByDate(items);
-        const keep = sorted[sorted.length - 1];
-        const stats = clipModule.groupStats(sorted, keep.newRel);
-        return {
-          id: 'sim-' + keep.newRel.slice(7, 20),
-          type: 'similar',
-          items: sorted,
-          keepRel: keep.newRel,
-          avgSimilarity: stats.avg,
-          minSimilarity: stats.min,
-          maxSimilarity: stats.max
-        };
-      })
-      .sort((a, b) => b.items.length - a.items.length);
-    const el = document.getElementById('similarCount');
-    if (el) el.textContent = String(similarSets.length);
+    buildSimilarSetsAsync().catch(() => {});
+  }
+
+  function renderScanProgress(p) {
+    const phasePct = {
+      phash: 15,
+      model: 25,
+      encode: 70,
+      cluster: 95
+    };
+    const pct = p.pct != null ? p.pct : (phasePct[p.phase] || 10);
+    const container = document.getElementById('mediaContainer');
+    if (!container || category !== 'similar') return;
+    const phashDone = p.phase === 'phash' || p.phase === 'model' || p.phase === 'encode' || p.phase === 'cluster';
+    const clipDone = p.phase === 'encode' || p.phase === 'cluster';
+    const clusterDone = p.phase === 'cluster' && p.done === p.total;
+    container.innerHTML =
+      '<div class="scan-progress similar-scan">' +
+      '<div class="scan-steps">' +
+      '<span class="' + (p.phase === 'phash' ? 'active' : (phashDone ? 'done' : '')) + '">① pHash</span>' +
+      '<span class="' + (p.phase === 'model' || p.phase === 'encode' ? 'active' : (clipDone ? 'done' : '')) + '">② CLIP</span>' +
+      '<span class="' + (p.phase === 'cluster' ? 'active' : (clusterDone ? 'done' : '')) + '">③ 聚类</span>' +
+      '</div>' +
+      '<div>' + escapeHtml(p.label || '') + '</div>' +
+      '<div class="bar"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
+      '<div class="scan-meta">' + (p.done != null ? p.done + ' / ' + p.total : '') +
+      (p.cacheHits != null ? ' · 缓存 ' + p.cacheHits : '') +
+      (clipAvailable === false && p.phase !== 'phash' ? ' · CLIP 降级' : '') +
+      '</div></div>';
   }
 
   async function scanSimilarImages(force) {
@@ -662,6 +659,8 @@
     similarScanning = true;
     similarScanned = false;
     similarSets = [];
+    suspectSets = [];
+    scanMeta = null;
     collapsedGroups.clear();
     const targets = ITEMS.filter(canClipEmbed);
     const total = targets.length;
@@ -672,43 +671,90 @@
       filter();
       return;
     }
-    const renderProgress = (p) => {
-      const pct = p.phase === 'model' ? 5 : p.phase === 'cluster' ? 95 : Math.round(10 + (p.done / p.total) * 80);
-      const container = document.getElementById('mediaContainer');
-      if (container && category === 'similar') {
-        container.innerHTML =
-          '<div class="scan-progress similar-scan">' +
-          '<div class="scan-steps">' +
-          '<span class="' + (p.phase === 'model' ? 'active' : (pct > 10 ? 'done' : '')) + '">① 模型</span>' +
-          '<span class="' + (p.phase === 'encode' ? 'active' : (p.phase === 'cluster' ? 'done' : '')) + '">② 向量</span>' +
-          '<span class="' + (p.phase === 'cluster' ? 'active' : '') + '">③ 聚类</span>' +
-          '</div>' +
-          '<div>' + escapeHtml(p.label || '') + '</div>' +
-          '<div class="bar"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
-          '<div class="scan-meta">' + p.done + ' / ' + p.total + ' · 缓存命中 ' + (p.cacheHits || 0) + '</div>' +
-          '</div>';
+
+    const clip = await getClipModule();
+    const modeCfg = clip.getSimilarModeConfig(similarMode);
+    similarThreshold = modeCfg.threshold;
+    clipAvailable = false;
+
+    const onProgress = (p) => {
+      if (p.phase === 'phash') {
+        renderScanProgress({ ...p, pct: Math.round(5 + (p.done / p.total) * 20) });
+        setStatus('pHash ' + p.done + '/' + p.total + '…');
+      } else if (p.phase === 'model') {
+        renderScanProgress({ ...p, done: 0, total, pct: 28, label: p.label || '加载 CLIP…' });
+      } else if (p.phase === 'encode') {
+        renderScanProgress({
+          ...p,
+          pct: Math.round(30 + (p.done / p.total) * 45),
+          label: p.label || 'CLIP 向量…'
+        });
+        setStatus('CLIP ' + p.done + '/' + p.total + '…');
+      } else if (p.phase === 'cluster') {
+        const denom = p.total || 1;
+        renderScanProgress({
+          ...p,
+          pct: Math.round(78 + (p.done / denom) * 20),
+          label: p.label || '聚类…'
+        });
       }
-      if (p.phase === 'encode') setStatus('CLIP 分析 ' + p.done + '/' + p.total + '…');
     };
-    renderProgress({ phase: 'model', done: 0, total, cacheHits: 0, label: '正在启动 Worker…' });
+
+    renderScanProgress({ phase: 'phash', done: 0, total, label: '启动感知哈希…' });
+
     try {
-      const clip = await getClipModule();
-      const modeCfg = clip.getSimilarModeConfig(similarMode);
-      similarThreshold = modeCfg.threshold;
-      const { cacheHits } = await clip.scanEmbeddings({
+      const phashRes = await clip.scanPhashes({
+        items: targets,
+        urlFor: (item) => srcOf(item),
+        onProgress
+      });
+
+      let result = await clip.buildSimilarGroups({
+        items: targets,
+        mode: similarMode,
+        threshold: similarThreshold,
+        urlFor: (item) => srcOf(item),
+        clipAvailable: false,
+        onProgress
+      });
+      similarSets = result.groups.filter(g => !isExactOnlyGroup(g.items));
+      suspectSets = result.suspects || [];
+      scanMeta = result.meta;
+      const el = document.getElementById('similarCount');
+      if (el) el.textContent = String(similarSets.length);
+      filter();
+
+      const clipRes = await clip.scanEmbeddings({
         items: targets,
         repoHead: repoHeadCommit,
         urlFor: (item) => srcOf(item),
-        onProgress: renderProgress
+        onProgress
       });
-      await buildSimilarSetsAsync();
-      setStatus(
-        '相似分析完成：' + similarSets.length + ' 组（缓存 ' + cacheHits + '/' + total + '）',
-        'ok'
-      );
+      clipAvailable = !!clipRes.clipAvailable;
+
+      result = await clip.buildSimilarGroups({
+        items: targets,
+        mode: similarMode,
+        threshold: similarThreshold,
+        urlFor: (item) => srcOf(item),
+        clipAvailable,
+        onProgress
+      });
+      similarSets = result.groups.filter(g => !isExactOnlyGroup(g.items));
+      suspectSets = result.suspects || [];
+      scanMeta = result.meta;
+      if (el) el.textContent = String(similarSets.length);
+
+      const status = clipAvailable
+        ? '相似分析完成：' + similarSets.length + ' 组'
+        : '相似分析完成（仅 pHash）：' + similarSets.length + ' 组';
+      const detail = ' · pHash缓存 ' + phashRes.cacheHits + '/' + total +
+        (clipAvailable ? ' · CLIP缓存 ' + clipRes.cacheHits + '/' + total : ' · CLIP 不可用');
+      setStatus(status + detail, clipAvailable ? 'ok' : 'err');
     } catch (e) {
-      setStatus('CLIP 分析失败: ' + e.message, 'err');
+      setStatus('相似分析失败: ' + e.message, 'err');
     }
+
     similarScanning = false;
     similarScanned = true;
     autoSmartSelected = false;
@@ -1058,6 +1104,12 @@
       html += '<span class="sim-score" title="相对保留项相似度">' + label + '</span>';
       html += '<div class="sim-bar"><div class="sim-bar-fill" style="width:' + pct + '%"></div></div>';
     }
+    if (group.type === 'similar' && !isKeep && item.matchPath) {
+      html += '<span class="match-path" title="命中路径">' + escapeHtml(item.matchPath) + '</span>';
+    }
+    if (group.type === 'similar' && !isKeep && item.phashDistToKeep != null && item.simToKeep == null) {
+      html += '<span class="match-path" title="pHash 汉明距离">pHash ' + item.phashDistToKeep + '</span>';
+    }
     if (item.kind !== 'image') html += '<span class="type-badge">' + escapeHtml(item.ext) + '</span>';
     html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
     html += '<div class="card-hover">';
@@ -1080,7 +1132,14 @@
     if (mode === 'exact') {
       html += '按文件名 hash 精确分组。点击「智能选中」后才会勾选待删项。';
     } else {
-      html += '<strong>相似审阅</strong> · 完全链接聚类 + SSIM 复核。请逐组确认后再删除。';
+      html += '<strong>相似审阅</strong> · pHash 快筛 + CLIP 增强 + 灰区 SSIM。请逐组确认后再删除。';
+      if (scanMeta) {
+        html += '<div class="scan-summary">';
+        html += '引擎：' + (scanMeta.clipAvailable ? 'pHash+CLIP' : '仅 pHash（CLIP 降级）');
+        if (scanMeta.clipHost) html += ' · ' + escapeHtml(scanMeta.clipHost.replace(/^https?:\/\//, '').slice(0, 40));
+        html += ' · 确认对 ' + scanMeta.confirmedPairs + ' · 疑似对 ' + scanMeta.suspectPairs;
+        html += '</div>';
+      }
     }
     html += '</div>';
     html += '<div class="dup-toolbar-actions">';
@@ -1088,10 +1147,10 @@
     html += '<button type="button" data-dup-action="clear-select">取消选中</button>';
     if (mode === 'similar') {
       html += '<select id="similarMode" class="dup-select">';
-      html += '<option value="near"' + (similarMode === 'near' ? ' selected' : '') + '>近重复 (98%)</option>';
-      html += '<option value="semantic"' + (similarMode === 'semantic' ? ' selected' : '') + '>语义相似 (92%)</option>';
+      html += '<option value="near"' + (similarMode === 'near' ? ' selected' : '') + '>近重复 (94%)</option>';
+      html += '<option value="semantic"' + (similarMode === 'semantic' ? ' selected' : '') + '>语义相似 (97%)</option>';
       html += '</select>';
-      const minPct = modeCfg ? Math.round(modeCfg.min * 100) : 85;
+      const minPct = modeCfg ? Math.round(modeCfg.min * 100) : 90;
       const maxPct = modeCfg ? Math.round(modeCfg.max * 100) : 99;
       const curPct = Math.round(similarThreshold * 100);
       html += '<label class="thresh-label">阈值 <input type="range" id="similarThreshold" min="' + minPct + '" max="' + maxPct + '" value="' + curPct + '"> <span id="thresholdVal">' + curPct + '</span>%</label>';
@@ -1100,7 +1159,7 @@
     }
     html += '</div></div>';
 
-    if (!sets.length) {
+    if (!sets.length && !(mode === 'similar' && suspectSets.length)) {
       html += '<div class="empty">' + (mode === 'exact' ? '未发现 hash 重复' : '未发现视觉相似组（可调模式或阈值后重新扫描）') + '</div>';
       html += '</div>';
       return html;
@@ -1111,34 +1170,55 @@
     }
 
     sets.forEach((group, gi) => {
-      const keepItem = itemByRel(group.keepRel);
-      const keepDate = keepItem && keepItem.dateStr ? keepItem.dateStr : '';
-      const collapsed = collapsedGroups.has(group.id);
-      const selectedInGroup = group.items.filter(i => selected.has(i.newRel)).length;
-      html += '<div class="dup-group' + (collapsed ? ' collapsed' : '') + '" data-group-id="' + escapeAttr(group.id) + '">';
-      html += '<div class="dup-group-head" data-group-toggle="' + escapeAttr(group.id) + '">';
-      html += '<button type="button" class="dup-collapse-btn" aria-label="展开/折叠">' + (collapsed ? '▸' : '▾') + '</button>';
-      html += '<div class="dup-group-title">组 ' + (gi + 1) + ' · ' + group.items.length + ' 张';
-      if (selectedInGroup) html += ' · 已选 ' + selectedInGroup;
-      if (mode === 'exact') html += '<span class="sub">hash 相同</span>';
-      else {
-        html += '<span class="sub">相似 ' + formatSimPct(group.minSimilarity || group.avgSimilarity) +
-          '–' + formatSimPct(group.maxSimilarity || group.avgSimilarity) +
-          ' · 均 ' + formatSimPct(group.avgSimilarity) + '</span>';
-      }
-      if (keepDate) html += '<span class="sub">保留 ' + escapeHtml(keepDate) + '</span>';
+      html += renderOneDupGroup(group, gi, mode, hasToken, false);
+    });
+
+    if (mode === 'similar' && suspectSets.length) {
+      html += '<div class="suspect-section"><div class="suspect-title">疑似相似（阈值边缘 · 需人工确认）</div>';
+      suspectSets.forEach((group, gi) => {
+        html += renderOneDupGroup(group, gi, mode, hasToken, true);
+      });
       html += '</div>';
+    }
+
+    html += '</div>';
+    return html;
+  }
+
+  function renderOneDupGroup(group, gi, mode, hasToken, isSuspect) {
+    const keepItem = itemByRel(group.keepRel);
+    const keepDate = keepItem && keepItem.dateStr ? keepItem.dateStr : '';
+    const collapsed = collapsedGroups.has(group.id);
+    const selectedInGroup = group.items.filter(i => selected.has(i.newRel)).length;
+    let html = '<div class="dup-group' + (collapsed ? ' collapsed' : '') + (isSuspect ? ' suspect' : '') + '" data-group-id="' + escapeAttr(group.id) + '">';
+    html += '<div class="dup-group-head" data-group-toggle="' + escapeAttr(group.id) + '">';
+    html += '<button type="button" class="dup-collapse-btn" aria-label="展开/折叠">' + (collapsed ? '▸' : '▾') + '</button>';
+    html += '<div class="dup-group-title">' + (isSuspect ? '疑似 ' : '组 ') + (gi + 1) + ' · ' + group.items.length + ' 张';
+    if (selectedInGroup) html += ' · 已选 ' + selectedInGroup;
+    if (mode === 'exact') html += '<span class="sub">hash 相同</span>';
+    else if (group.paths && group.paths.length) {
+      html += '<span class="sub">' + escapeHtml(group.paths.join(' · ')) + '</span>';
+    } else if (group.minSimilarity != null) {
+      html += '<span class="sub">相似 ' + formatSimPct(group.minSimilarity) +
+        '–' + formatSimPct(group.maxSimilarity || group.minSimilarity) +
+        (group.avgSimilarity != null ? ' · 均 ' + formatSimPct(group.avgSimilarity) : '') + '</span>';
+    } else if (group.phashDist != null) {
+      html += '<span class="sub">pHash ' + group.phashDist + '</span>';
+    }
+    if (keepDate) html += '<span class="sub">保留 ' + escapeHtml(keepDate) + '</span>';
+    html += '</div>';
+    if (!isSuspect) {
       html += '<div class="dup-group-actions">';
       html += '<button type="button" data-group-action="smart" data-group-id="' + escapeAttr(group.id) + '">本组智能选中</button>';
       html += '<button type="button" data-group-action="all" data-group-id="' + escapeAttr(group.id) + '">全选本组</button>';
-      html += '</div></div>';
-      if (!collapsed) {
-        html += '<div class="grid dup-group-grid">';
-        group.items.forEach(item => { html += renderGroupCard(item, group, hasToken); });
-        html += '</div>';
-      }
       html += '</div>';
-    });
+    }
+    html += '</div>';
+    if (!collapsed) {
+      html += '<div class="grid dup-group-grid">';
+      group.items.forEach(item => { html += renderGroupCard(item, group, hasToken); });
+      html += '</div>';
+    }
     html += '</div>';
     return html;
   }
@@ -1156,7 +1236,8 @@
   function findGroupById(id) {
     return getSetsForCategory().find(g => g.id === id) ||
       exactSets.find(g => g.id === id) ||
-      similarSets.find(g => g.id === id);
+      similarSets.find(g => g.id === id) ||
+      suspectSets.find(g => g.id === id);
   }
 
   function renderGrid(list) {
@@ -1236,7 +1317,11 @@
       filtered = flattenSets(sets);
       if (stats) {
         const setLabel = mode === 'dup' ? '重复组' : '相似组';
-        stats.innerHTML = setLabel + ' <strong>' + sets.length + '</strong> · 共 <strong>' + filtered.length + '</strong> 张';
+        let statHtml = setLabel + ' <strong>' + sets.length + '</strong> · 共 <strong>' + filtered.length + '</strong> 张';
+        if (mode === 'similar' && suspectSets.length) {
+          statHtml += ' · 疑似 <strong>' + suspectSets.length + '</strong>';
+        }
+        stats.innerHTML = statHtml;
       }
 
       container.innerHTML = renderDupGroups(sets, mode);
@@ -1476,11 +1561,17 @@
           item.embedding = old.embedding;
           item.embeddingKey = old.embeddingKey;
         }
+        if (old && old.phash && old.blobSha === p.sha) {
+          item.phash = old.phash;
+        }
         return item;
       });
       await enrichDatesFromGit(ITEMS);
       if (clipModule) clipModule.clearMemCache();
       similarScanned = false;
+      similarSets = [];
+      suspectSets = [];
+      scanMeta = null;
       autoSmartSelected = false;
       rebuildDupIndex();
       updateCategoryCounts();
@@ -1828,7 +1919,7 @@
         const clip = await getClipModule();
         similarThreshold = clip.getSimilarModeConfig(similarMode).threshold;
         autoSmartSelected = false;
-        if (ITEMS.some(i => i.embedding)) {
+        if (ITEMS.some(i => i.phash || i.embedding)) {
           await buildSimilarSetsAsync();
           filter();
         } else {
@@ -1840,7 +1931,7 @@
       if (e.target.id !== 'similarThreshold') return;
       similarThreshold = +e.target.value / 100;
       autoSmartSelected = false;
-      if (ITEMS.some(i => i.embedding)) {
+      if (ITEMS.some(i => i.phash || i.embedding)) {
         await buildSimilarSetsAsync();
         filter();
       } else {

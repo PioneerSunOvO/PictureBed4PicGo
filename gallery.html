@@ -808,6 +808,43 @@
       background: var(--accent);
       border-radius: 999px;
     }
+    .match-path {
+      position: absolute;
+      left: 8px;
+      top: 8px;
+      z-index: 5;
+      font-size: 0.58rem;
+      font-weight: 600;
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: rgba(0,0,0,.55);
+      color: #fff;
+      max-width: calc(100% - 16px);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .scan-summary {
+      font-size: 0.72rem;
+      color: var(--muted);
+      margin-top: 6px;
+      line-height: 1.4;
+    }
+    .suspect-section {
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px dashed var(--line);
+    }
+    .suspect-title {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--warn);
+      margin-bottom: 10px;
+    }
+    .dup-group.suspect {
+      border-color: rgba(217, 119, 6, 0.35);
+      background: var(--warn-dim);
+    }
     .sidebar-foot .account-panel {
       border-color: transparent;
       background: transparent;
