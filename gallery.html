@@ -1090,6 +1090,63 @@
       border-color: transparent;
     }
     .lightbox-actions button.primary:hover { background: rgba(79,110,247,1); }
+
+    .lightbox.fullscreen-mode {
+      padding: 0;
+      gap: 0;
+      background: #0b0f17;
+      backdrop-filter: none;
+    }
+    .lightbox.fullscreen-mode .lightbox-stage {
+      flex: 1 1 auto;
+      height: 100vh;
+      max-height: 100vh;
+    }
+    .lightbox.fullscreen-mode .lightbox-view {
+      max-height: 100vh;
+      height: 100%;
+    }
+    .lightbox.fullscreen-mode .lb-zoom {
+      border-radius: 0;
+      min-height: 100%;
+      height: 100%;
+    }
+    .lightbox.fullscreen-mode .lb-zoom img,
+    .lightbox.fullscreen-mode .lb-zoom video {
+      max-width: 100vw;
+      max-height: 100vh;
+      width: auto;
+      height: auto;
+      border-radius: 0;
+      box-shadow: none;
+      object-fit: contain;
+    }
+    .lightbox.fullscreen-mode .lightbox-nav { display: none; }
+    .lightbox-exit {
+      display: none;
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 210;
+      width: 44px;
+      height: 44px;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 999px;
+      background: rgba(17,24,39,.55);
+      color: #fff;
+      font-size: 1.5rem;
+      line-height: 1;
+      cursor: pointer;
+      backdrop-filter: blur(8px);
+      transition: background .15s ease, transform .15s ease;
+    }
+    .lightbox-exit:hover {
+      background: rgba(255,255,255,.22);
+      transform: scale(1.04);
+    }
+    .lightbox.fullscreen-mode .lightbox-exit { display: flex; align-items: center; justify-content: center; }
+    .lightbox-exit[hidden] { display: none !important; }
+
     .sidebar-foot .account-panel {
       border-color: transparent;
       background: transparent;
@@ -1359,6 +1416,7 @@
   </div>
 
   <div class="lightbox" id="lightbox">
+    <button type="button" class="lightbox-exit" id="lightboxExit" hidden aria-label="退出全屏">&times;</button>
     <div class="lightbox-stage">
       <button type="button" class="lightbox-nav prev" id="lightboxPrev" aria-label="上一张">‹</button>
       <div class="lightbox-view" id="lightboxView"></div>
@@ -1380,7 +1438,7 @@
       scope: 'repo'
     };
   </script>
-  <script src="gallery-app.js?v=lb-compare-1"></script>
+  <script src="gallery-app.js?v=lb-preview-2"></script>
   <script>
     GalleryApp.init({ items: [], oldMap: {} });
   </script>

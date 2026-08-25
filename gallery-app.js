@@ -51,7 +51,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'lb-compare-1';
+  const ASSET_VERSION = 'lb-preview-2';
   const ACTIONS_SIMILAR_URL =
     'https://github.com/PioneerSunOvO/PictureBed4PicGo/actions/workflows/similar-index.yml';
   /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
@@ -59,6 +59,7 @@
 
   /** Lightbox / compare state */
   let lbMode = 'single'; // single | compare
+  let lbFullscreen = false;
   let lbCompareLeft = null;
   let lbCompareRight = null;
   let lbComparePool = [];
@@ -1370,7 +1371,7 @@
     actions.innerHTML =
       '<button type="button" class="primary" data-action="copy-url">复制链接</button>' +
       '<button type="button" data-action="copy-name">复制文件名</button>' +
-      '<button type="button" data-action="preview">全屏预览</button>' +
+      '<button type="button" data-action="fullscreen">全屏预览</button>' +
       '<a href="' + escapeAttr(url) + '" target="_blank" rel="noopener">新窗口</a>' +
       (hasToken
         ? '<button type="button" data-action="rename">重命名</button>' +
@@ -1581,7 +1582,14 @@
   function renderLbToolbar() {
     const caption = document.getElementById('lightboxCaption');
     const actions = document.getElementById('lightboxActions');
+    const toolbar = document.querySelector('.lightbox-toolbar');
+    if (toolbar) toolbar.style.display = lbFullscreen ? 'none' : '';
     if (!caption || !actions) return;
+    if (lbFullscreen) {
+      actions.innerHTML = '';
+      caption.textContent = '';
+      return;
+    }
     actions.innerHTML = '';
 
     if (lbMode === 'compare' && lbCompareLeft && lbCompareRight) {
@@ -1603,6 +1611,12 @@
     }
 
     addBtn('关闭', '', closeLightbox);
+    if (lbMode === 'single' && filtered[lightboxIdx] && (filtered[lightboxIdx].kind === 'image' || filtered[lightboxIdx].kind === 'video')) {
+      addBtn('全屏', 'primary', () => {
+        lbFullscreen = true;
+        renderLightboxStage();
+      });
+    }
     addBtn('复位缩放', '', () => lbZoomControllers.forEach(c => c.reset && c.reset()));
 
     const active = lbMode === 'compare'
@@ -1672,11 +1686,20 @@
   async function renderLightboxStage() {
     const lb = document.getElementById('lightbox');
     const view = document.getElementById('lightboxView');
+    const exitBtn = document.getElementById('lightboxExit');
     if (!lb || !view) return;
     destroyLbZoom();
     view.innerHTML = '';
     view.classList.toggle('compare', lbMode === 'compare');
     lb.classList.toggle('compare-mode', lbMode === 'compare');
+    lb.classList.toggle('fullscreen-mode', lbFullscreen);
+    if (exitBtn) exitBtn.hidden = !lbFullscreen;
+
+    if (lbMode === 'compare') {
+      lbFullscreen = false;
+      lb.classList.remove('fullscreen-mode');
+      if (exitBtn) exitBtn.hidden = true;
+    }
 
     if (lbMode === 'compare' && lbCompareLeft && lbCompareRight) {
       const leftPane = buildLbPane(lbCompareLeft, '左');
@@ -1695,8 +1718,9 @@
     renderLbToolbar();
   }
 
-  function openLightbox(item) {
+  function openLightbox(item, fullscreen) {
     lbMode = 'single';
+    lbFullscreen = !!fullscreen;
     lbCompareLeft = null;
     lbCompareRight = null;
     lbComparePool = [];
@@ -1709,9 +1733,14 @@
     renderLightboxStage();
   }
 
+  function openLightboxFullscreen(item) {
+    openLightbox(item, true);
+  }
+
   function openCompare(left, right, pool) {
     if (!left || !right) return;
     lbMode = 'compare';
+    lbFullscreen = false;
     lbCompareLeft = left;
     lbCompareRight = right;
     lbComparePool = (pool && pool.length ? pool : [left, right]).slice();
@@ -1741,8 +1770,12 @@
 
   function closeLightbox() {
     destroyLbZoom();
-    document.getElementById('lightbox').classList.remove('open');
-    document.getElementById('lightbox').classList.remove('compare-mode');
+    const lb = document.getElementById('lightbox');
+    lb.classList.remove('open');
+    lb.classList.remove('compare-mode');
+    lb.classList.remove('fullscreen-mode');
+    const exitBtn = document.getElementById('lightboxExit');
+    if (exitBtn) exitBtn.hidden = true;
     const view = document.getElementById('lightboxView');
     if (view) {
       view.innerHTML = '';
@@ -1754,6 +1787,7 @@
     if (actions) actions.innerHTML = '';
     lightboxIdx = -1;
     lbMode = 'single';
+    lbFullscreen = false;
     lbCompareLeft = null;
     lbCompareRight = null;
     lbComparePool = [];
@@ -1778,7 +1812,9 @@
       navigator.clipboard.writeText(item.name);
       setStatus('已复制文件名', 'ok');
     } else if (action === 'preview') {
-      openLightbox(item);
+      openLightbox(item, false);
+    } else if (action === 'fullscreen') {
+      openLightboxFullscreen(item);
     } else if (action === 'delete') {
       deleteOne(rel).catch(err => setStatus('删除失败: ' + err.message, 'err'));
     } else if (action === 'rename') {
@@ -2110,6 +2146,17 @@
         return;
       }
 
+      if (e.detail >= 2 && item) {
+        focused = item.name;
+        openDetail(item);
+        return;
+      }
+
+      if (item && (item.kind === 'image' || item.kind === 'video')) {
+        openLightbox(item, false);
+        return;
+      }
+
       focused = item.name;
       openDetail(item);
     });
@@ -2123,7 +2170,12 @@
     });
 
     document.getElementById('lightbox').onclick = e => {
+      if (lbFullscreen) return;
       if (e.target.id === 'lightbox' || e.target.classList.contains('lightbox-stage')) closeLightbox();
+    };
+    document.getElementById('lightboxExit').onclick = e => {
+      e.stopPropagation();
+      closeLightbox();
     };
     document.getElementById('lightboxPrev').onclick = e => { e.stopPropagation(); lightboxNav(-1); };
     document.getElementById('lightboxNext').onclick = e => { e.stopPropagation(); lightboxNav(1); };
