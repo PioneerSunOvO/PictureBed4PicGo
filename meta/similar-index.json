@@ -1,0 +1,235 @@
+{
+  "algoVersion": 1,
+  "generatedAt": "2026-08-25T08:27:06Z",
+  "imageCount": 129,
+  "clipStatus": "skipped",
+  "clipModel": null,
+  "clipError": null,
+  "groups": [
+    {
+      "id": "near-1",
+      "kind": "near",
+      "items": [
+        {
+          "file": "20220529203059587-110e9992aa623af1687159abf5f88d68.png",
+          "role": "dup",
+          "matchPath": "dhash<=8",
+          "phashDist": 30,
+          "clipSim": null,
+          "ssim": null
+        },
+        {
+          "file": "20220529203352018-932c5b8aebf193a781c2d648cac9d2e7.png",
+          "role": "dup",
+          "matchPath": "dhash<=8",
+          "phashDist": 30,
+          "clipSim": null,
+          "ssim": null
+        },
+        {
+          "file": "20220529204255007-427af647639085ee81e80785b7d23300.png",
+          "role": "dup",
+          "matchPath": "dhash<=8",
+          "phashDist": 16,
+          "clipSim": null,
+          "ssim": null
+        },
+        {
+          "file": "20220530083854344-21cbc13d361744f699eaf418c03fca24.png",
+          "role": "keep",
+          "matchPath": "near",
+          "phashDist": null,
+          "clipSim": null,
+          "ssim": null
+        }
+      ],
+      "paths": [
+        "dhash<=8"
+      ]
+    },
+    {
+      "id": "near-2",
+      "kind": "near",
+      "items": [
+        {
+          "file": "20241119194753146-ae8b0e862a001d1fa47bb18bae58490a.png",
+          "role": "dup",
+          "matchPath": "dhash<=8",
+          "phashDist": 18,
+          "clipSim": null,
+          "ssim": null
+        },
+        {
+          "file": "20241123141859218-9c310730f38b0a2e2dcd5166d5dc2c61.png",
+          "role": "keep",
+          "matchPath": "near",
+          "phashDist": null,
+          "clipSim": null,
+          "ssim": null
+        }
+      ],
+      "paths": [
+        "dhash<=8"
+      ]
+    },
+    {
+      "id": "near-3",
+      "kind": "near",
+      "items": [
+        {
+          "file": "20241120122156816-a3f51d4e83c1cbab1428515d5bfd36e5.png",
+          "role": "dup",
+          "matchPath": "dhash<=8",
+          "phashDist": 20,
+          "clipSim": null,
+          "ssim": null
+        },
+        {
+          "file": "20241123164213558-9bf652b7fe86f13ac1bcdcb3e81ce5e4.png",
+          "role": "keep",
+          "matchPath": "near",
+          "phashDist": null,
+          "clipSim": null,
+          "ssim": null
+        }
+      ],
+      "paths": [
+        "dhash<=8"
+      ]
+    },
+    {
+      "id": "near-4",
+      "kind": "near",
+      "items": [
+        {
+          "file": "20241124220957725-6e2e2647eec5e287b39e351768ed310c.png",
+          "role": "dup",
+          "matchPath": "dhash<=8",
+          "phashDist": 10,
+          "clipSim": null,
+          "ssim": null
+        },
+        {
+          "file": "20241124221340385-0d4a0d2e51767adad163e24f0ef5f3f9.png",
+          "role": "keep",
+          "matchPath": "near",
+          "phashDist": null,
+          "clipSim": null,
+          "ssim": null
+        }
+      ],
+      "paths": [
+        "dhash<=8"
+      ]
+    },
+    {
+      "id": "near-5",
+      "kind": "near",
+      "items": [
+        {
+          "file": "20241124222234432-38e6e14e0f54f7dc69bc547de1536194.png",
+          "role": "dup",
+          "matchPath": "dhash<=8|phash<=8",
+          "phashDist": 2,
+          "clipSim": null,
+          "ssim": null
+        },
+        {
+          "file": "20241124222539804-583c004924aaa658304371b070611968.png",
+          "role": "keep",
+          "matchPath": "near",
+          "phashDist": null,
+          "clipSim": null,
+          "ssim": null
+        }
+      ],
+      "paths": [
+        "dhash<=8|phash<=8"
+      ]
+    },
+    {
+      "id": "near-6",
+      "kind": "near",
+      "items": [
+        {
+          "file": "20241124223205719-b8690522ef9b4a6738abbd6f3e3cea27.png",
+          "role": "dup",
+          "matchPath": "dhash<=8",
+          "phashDist": 20,
+          "clipSim": null,
+          "ssim": null
+        },
+        {
+          "file": "20241124223350432-050442153d08b7663ea0fe050d560c96.png",
+          "role": "keep",
+          "matchPath": "near",
+          "phashDist": null,
+          "clipSim": null,
+          "ssim": null
+        }
+      ],
+      "paths": [
+        "dhash<=8"
+      ]
+    }
+  ],
+  "suspects": [
+    {
+      "id": "suspect-1",
+      "kind": "suspect",
+      "items": [
+        {
+          "file": "20241119230608026-028b65d5558a738aaa7eba492297d763.png",
+          "role": "dup",
+          "matchPath": "suspect",
+          "phashDist": 12,
+          "clipSim": null,
+          "ssim": null
+        },
+        {
+          "file": "20241120121316192-98204fb84170e5a8dd9d631d552694a6.png",
+          "role": "keep",
+          "matchPath": "suspect",
+          "phashDist": null,
+          "clipSim": null,
+          "ssim": null
+        }
+      ],
+      "paths": [
+        "suspect"
+      ]
+    },
+    {
+      "id": "suspect-2",
+      "kind": "suspect",
+      "items": [
+        {
+          "file": "20241123162350531-adf6224c079a85e5e510643d665e0950.png",
+          "role": "dup",
+          "matchPath": "suspect",
+          "phashDist": 12,
+          "clipSim": null,
+          "ssim": null
+        },
+        {
+          "file": "20241125201022457-730e217841e49dd1dac05be5d4a9a39e.png",
+          "role": "keep",
+          "matchPath": "suspect",
+          "phashDist": null,
+          "clipSim": null,
+          "ssim": null
+        }
+      ],
+      "paths": [
+        "suspect"
+      ]
+    }
+  ],
+  "meta": {
+    "nearPairs": 11,
+    "semanticPairs": 0,
+    "suspectPairs": 2,
+    "nearGroups": 6,
+    "semanticGroups": 0
+  }
+}

@@ -43,17 +43,16 @@
   let similarSets = [];
   let suspectSets = [];
   let scanMeta = null;
-  let clipAvailable = false;
-  let clipModule = null;
-  let similarScanned = false;
-  let similarScanning = false;
+  let similarIndexRaw = null;
+  let similarLoaded = false;
+  let similarLoading = false;
   let autoSmartSelected = false;
-  let similarThreshold = 0.94;
-  let similarMode = 'near';
+  /** near | semantic | all — filters precomputed JSON groups */
+  let similarMode = 'all';
   const collapsedGroups = new Set();
-  const CLIP_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']);
-  /** Bump when clip-embed / clip-worker change, to bust browser module cache. */
-  const ASSET_VERSION = '7998b94b';
+  const ASSET_VERSION = 'actions-sim-1';
+  const ACTIONS_SIMILAR_URL =
+    'https://github.com/PioneerSunOvO/PictureBed4PicGo/actions/workflows/similar-index.yml';
   /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
   let repoHeadCommit = null;
 
@@ -507,57 +506,6 @@
     return m ? m[1].toLowerCase() : '';
   }
 
-  function canClipEmbed(item) {
-    return item.kind === 'image' && CLIP_EXTS.has(item.ext);
-  }
-
-  async function getClipModule() {
-    if (!clipModule) clipModule = await import('./clip-embed.js?v=' + ASSET_VERSION);
-    return clipModule;
-  }
-
-  function stripItemEmbeddings() {
-    ITEMS.forEach(item => {
-      delete item.embedding;
-      delete item.embeddingKey;
-      delete item.phash;
-      delete item.phashLowEntropy;
-      delete item.simToKeep;
-      delete item.ssimToKeep;
-      delete item.phashDistToKeep;
-      delete item.matchPath;
-    });
-  }
-
-  async function clearClipCache() {
-    if (!confirm('清除本机全部 CLIP 向量缓存？下次相似扫描需重新计算。')) return;
-    try {
-      const clip = await getClipModule();
-      const { cleared } = await clip.clearAllCache();
-      stripItemEmbeddings();
-      similarScanned = false;
-      similarSets = [];
-      suspectSets = [];
-      scanMeta = null;
-      autoSmartSelected = false;
-      const el = document.getElementById('similarCount');
-      if (el) el.textContent = '0';
-      setStatus('已清除 ' + cleared + ' 条向量缓存', 'ok');
-      if (category === 'similar') scanSimilarImages(true);
-      else filter();
-    } catch (e) {
-      setStatus('清除缓存失败: ' + e.message, 'err');
-    }
-  }
-
-  async function purgeStaleClipCache() {
-    try {
-      const clip = await getClipModule();
-      const { removed } = await clip.purgeStaleCache();
-      if (removed > 0) setStatus('已清理 ' + removed + ' 条过期向量缓存', 'ok');
-    } catch (_) { /* ignore */ }
-  }
-
   function sortItemsByDate(items) {
     return [...items].sort((a, b) => {
       const da = a.date ? a.date.getTime() : 0;
@@ -594,175 +542,138 @@
     return hashes.size === 1 && items.every(i => i.hash);
   }
 
-  function cosineSimilarity(a, b) {
-    if (!clipModule) return 0;
-    return clipModule.cosineSimilarity(a, b);
+  function itemByFileName(file) {
+    const rel = file.startsWith('images/') ? file : 'images/' + file;
+    return itemByRel(rel) || ITEMS.find(i => i.name === file || i.name === rel.split('/').pop());
+  }
+
+  function stripItemSimilarMeta() {
+    ITEMS.forEach(item => {
+      delete item.simToKeep;
+      delete item.ssimToKeep;
+      delete item.phashDistToKeep;
+      delete item.matchPath;
+    });
   }
 
   function formatSimPct(sim) {
-    if (clipModule) return clipModule.formatSimilarity(sim);
     return Math.round(Math.max(0, Math.min(1, sim)) * 1000) / 10 + '%';
   }
 
-  async function buildSimilarSetsAsync(onProgress) {
-    const clip = await getClipModule();
-    const targets = ITEMS.filter(canClipEmbed);
-    const result = await clip.buildSimilarGroups({
-      items: targets,
-      mode: similarMode,
-      threshold: similarThreshold,
-      urlFor: (item) => srcOf(item),
-      clipAvailable,
-      onProgress
+  function mapIndexGroup(g, isSuspect) {
+    const mapped = [];
+    (g.items || []).forEach(it => {
+      const item = itemByFileName(it.file);
+      if (!item) return;
+      if (it.role !== 'keep') {
+        if (it.clipSim != null) item.simToKeep = it.clipSim;
+        if (it.ssim != null) item.ssimToKeep = it.ssim;
+        if (it.phashDist != null) item.phashDistToKeep = it.phashDist;
+        if (it.matchPath) item.matchPath = it.matchPath;
+      }
+      mapped.push(item);
     });
-    similarSets = result.groups.filter(g => !isExactOnlyGroup(g.items));
-    suspectSets = result.suspects || [];
-    scanMeta = result.meta;
+    if (mapped.length < 2) return null;
+    const keepEntry = (g.items || []).find(it => it.role === 'keep');
+    const keepItem = (keepEntry && itemByFileName(keepEntry.file)) || pickKeepItem(mapped);
+    return {
+      id: g.id,
+      type: 'similar',
+      kind: g.kind || (isSuspect ? 'suspect' : 'near'),
+      items: sortItemsByDate(mapped),
+      keepRel: keepItem.newRel,
+      paths: g.paths || [],
+      minSimilarity: g.minSimilarity,
+      maxSimilarity: g.maxSimilarity,
+      avgSimilarity: g.avgSimilarity,
+      phashDist: mapped.find(i => i.phashDistToKeep != null)?.phashDistToKeep
+    };
+  }
+
+  function applySimilarIndex(index) {
+    similarIndexRaw = index;
+    stripItemSimilarMeta();
+    const mode = similarMode;
+    const groups = (index.groups || []).filter(g => {
+      if (mode === 'all') return g.kind === 'near' || g.kind === 'semantic';
+      return g.kind === mode;
+    });
+    similarSets = groups.map(g => mapIndexGroup(g, false)).filter(Boolean)
+      .filter(g => !isExactOnlyGroup(g.items));
+    suspectSets = (index.suspects || []).map(g => mapIndexGroup(g, true)).filter(Boolean);
+    scanMeta = {
+      clipStatus: index.clipStatus,
+      clipError: index.clipError,
+      clipModel: index.clipModel,
+      generatedAt: index.generatedAt,
+      algoVersion: index.algoVersion,
+      imageCount: index.imageCount,
+      confirmedPairs: (index.meta && index.meta.nearPairs) || 0,
+      suspectPairs: (index.meta && index.meta.suspectPairs) || 0,
+      nearGroups: (index.meta && index.meta.nearGroups) || 0,
+      semanticGroups: (index.meta && index.meta.semanticGroups) || 0
+    };
     const el = document.getElementById('similarCount');
     if (el) el.textContent = String(similarSets.length);
-    return result;
   }
 
-  function buildSimilarSets() {
-    if (!clipModule) return;
-    buildSimilarSetsAsync().catch(() => {});
+  function similarIndexUrls() {
+    const pin = repoHeadCommit || 'master';
+    const bust = ASSET_VERSION + '-' + (repoHeadCommit || Date.now());
+    const path = 'meta/similar-index.json';
+    return [
+      path + '?v=' + encodeURIComponent(bust),
+      'https://cdn.jsdelivr.net/gh/PioneerSunOvO/PictureBed4PicGo@' + pin + '/' + path + '?v=' + bust,
+      'https://raw.githubusercontent.com/PioneerSunOvO/PictureBed4PicGo/' + pin + '/' + path + '?v=' + bust
+    ];
   }
 
-  function renderScanProgress(p) {
-    const phasePct = {
-      phash: 15,
-      model: 25,
-      encode: 70,
-      cluster: 95
-    };
-    const pct = p.pct != null ? p.pct : (phasePct[p.phase] || 10);
-    const container = document.getElementById('mediaContainer');
-    if (!container || category !== 'similar') return;
-    const phashDone = p.phase === 'phash' || p.phase === 'model' || p.phase === 'encode' || p.phase === 'cluster';
-    const clipDone = p.phase === 'encode' || p.phase === 'cluster';
-    const clusterDone = p.phase === 'cluster' && p.done === p.total;
-    container.innerHTML =
-      '<div class="scan-progress similar-scan">' +
-      '<div class="scan-steps">' +
-      '<span class="' + (p.phase === 'phash' ? 'active' : (phashDone ? 'done' : '')) + '">① pHash</span>' +
-      '<span class="' + (p.phase === 'model' || p.phase === 'encode' ? 'active' : (clipDone ? 'done' : '')) + '">② CLIP</span>' +
-      '<span class="' + (p.phase === 'cluster' ? 'active' : (clusterDone ? 'done' : '')) + '">③ 聚类</span>' +
-      '</div>' +
-      '<div>' + escapeHtml(p.label || '') + '</div>' +
-      '<div class="bar"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
-      '<div class="scan-meta">' + (p.done != null ? p.done + ' / ' + p.total : '') +
-      (p.cacheHits != null ? ' · 缓存 ' + p.cacheHits : '') +
-      (clipAvailable === false && p.phase !== 'phash' ? ' · CLIP 降级' : '') +
-      '</div></div>';
+  async function fetchSimilarIndexJson() {
+    let lastErr = null;
+    for (const url of similarIndexUrls()) {
+      try {
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) throw new Error(url + ' → ' + res.status);
+        return await res.json();
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr || new Error('similar-index.json 不可用');
   }
 
-  async function scanSimilarImages(force) {
-    if (similarScanning) return;
-    if (similarScanned && !force) return;
-    similarScanning = true;
-    similarScanned = false;
+  async function loadSimilarIndex(force) {
+    if (similarLoading) return;
+    if (similarLoaded && !force) return;
+    similarLoading = true;
+    similarLoaded = false;
     similarSets = [];
     suspectSets = [];
     scanMeta = null;
     collapsedGroups.clear();
-    const targets = ITEMS.filter(canClipEmbed);
-    const total = targets.length;
-    if (!total) {
-      similarScanning = false;
-      similarScanned = true;
-      setStatus('没有可分析的图片格式', 'err');
-      filter();
-      return;
+    const container = document.getElementById('mediaContainer');
+    if (container && category === 'similar') {
+      container.innerHTML = '<div class="scan-progress"><div>加载相似索引…</div></div>';
     }
-
-    const clip = await getClipModule();
-    const modeCfg = clip.getSimilarModeConfig(similarMode);
-    similarThreshold = modeCfg.threshold;
-    clipAvailable = false;
-
-    const onProgress = (p) => {
-      if (p.phase === 'phash') {
-        renderScanProgress({ ...p, pct: Math.round(5 + (p.done / p.total) * 20) });
-        setStatus('pHash ' + p.done + '/' + p.total + '…');
-      } else if (p.phase === 'model') {
-        renderScanProgress({ ...p, done: 0, total, pct: 28, label: p.label || '加载 CLIP…' });
-      } else if (p.phase === 'encode') {
-        renderScanProgress({
-          ...p,
-          pct: Math.round(30 + (p.done / p.total) * 45),
-          label: p.label || 'CLIP 向量…'
-        });
-        setStatus('CLIP ' + p.done + '/' + p.total + '…');
-      } else if (p.phase === 'cluster') {
-        const denom = p.total || 1;
-        renderScanProgress({
-          ...p,
-          pct: Math.round(78 + (p.done / denom) * 20),
-          label: p.label || '聚类…'
-        });
-      }
-    };
-
-    renderScanProgress({ phase: 'phash', done: 0, total, label: '启动感知哈希…' });
-
+    setStatus('加载 meta/similar-index.json…');
     try {
-      const phashRes = await clip.scanPhashes({
-        items: targets,
-        urlFor: (item) => urlsFor(item),
-        onProgress
-      });
-
-      let result = await clip.buildSimilarGroups({
-        items: targets,
-        mode: similarMode,
-        threshold: similarThreshold,
-        urlFor: (item) => srcOf(item),
-        clipAvailable: false,
-        onProgress
-      });
-      similarSets = result.groups.filter(g => !isExactOnlyGroup(g.items));
-      suspectSets = result.suspects || [];
-      scanMeta = result.meta;
-      const el = document.getElementById('similarCount');
-      if (el) el.textContent = String(similarSets.length);
-      filter();
-
-      const clipRes = await clip.scanEmbeddings({
-        items: targets,
-        repoHead: repoHeadCommit,
-        urlFor: (item) => srcOf(item),
-        onProgress
-      });
-      clipAvailable = !!clipRes.clipAvailable;
-
-      result = await clip.buildSimilarGroups({
-        items: targets,
-        mode: similarMode,
-        threshold: similarThreshold,
-        urlFor: (item) => srcOf(item),
-        clipAvailable,
-        onProgress
-      });
-      similarSets = result.groups.filter(g => !isExactOnlyGroup(g.items));
-      suspectSets = result.suspects || [];
-      scanMeta = result.meta;
-      if (el) el.textContent = String(similarSets.length);
-
-      const status = clipAvailable
-        ? '相似分析完成：' + similarSets.length + ' 组'
-        : '相似分析完成（仅 pHash）：' + similarSets.length + ' 组';
-      const detail = ' · pHash缓存 ' + phashRes.cacheHits + '/' + total +
-        (phashRes.failed ? ' · pHash失败 ' + phashRes.failed : '') +
-        (clipAvailable ? ' · CLIP缓存 ' + clipRes.cacheHits + '/' + total : ' · CLIP: ' + (clipRes.error || '不可用'));
-      setStatus(status + detail, clipAvailable ? 'ok' : 'err');
+      const index = await fetchSimilarIndexJson();
+      applySimilarIndex(index);
+      similarLoaded = true;
+      const st = index.clipStatus === 'ok' ? 'ok' : (index.clipStatus === 'failed' ? 'err' : 'ok');
+      setStatus(
+        '相似索引已加载：' + similarSets.length + ' 组 · CLIP ' + (index.clipStatus || '?') +
+        (index.generatedAt ? ' · ' + index.generatedAt : ''),
+        st
+      );
     } catch (e) {
-      setStatus('相似分析失败: ' + e.message, 'err');
+      similarLoaded = true;
+      similarSets = [];
+      setStatus('相似索引加载失败: ' + e.message + ' · 可点「触发重算」跑 Actions', 'err');
     }
-
-    similarScanning = false;
-    similarScanned = true;
+    similarLoading = false;
     autoSmartSelected = false;
-    filter();
+    if (category === 'similar') filter();
   }
 
   function smartSelectGroups(sets, replace) {
@@ -793,7 +704,7 @@
     const dupFiles = ITEMS.filter(i => i.dupCount > 0).length;
     const el = document.getElementById('dupCount');
     if (el) el.textContent = String(dupFiles);
-    if (similarScanned) buildSimilarSets();
+    if (similarLoaded && similarIndexRaw) applySimilarIndex(similarIndexRaw);
     return dupFiles;
   }
 
@@ -1138,21 +1049,20 @@
 
   function renderDupGroups(sets, mode) {
     const hasToken = !!token();
-    const modeCfg = clipModule ? clipModule.getSimilarModeConfig(similarMode) : null;
     let html = '<div class="dup-workflow">';
     html += '<div class="dup-toolbar">';
     html += '<div class="hint">';
     if (mode === 'exact') {
       html += '按文件名 hash 精确分组。点击「智能选中」后才会勾选待删项。';
     } else {
-      html += '<strong>相似审阅</strong> · pHash 快筛 + CLIP 增强 + 灰区 SSIM。请逐组确认后再删除。';
+      html += '<strong>相似审阅</strong> · 由 GitHub Actions 预计算（pHash + CLIP），本页只读索引。';
       if (scanMeta) {
         html += '<div class="scan-summary">';
-        html += '引擎：' + (scanMeta.clipAvailable ? 'pHash+CLIP' : '仅 pHash（CLIP 降级）');
+        html += '引擎：Actions · CLIP ' + escapeHtml(String(scanMeta.clipStatus || '?'));
         if (scanMeta.clipError) html += ' · ' + escapeHtml(String(scanMeta.clipError).slice(0, 80));
-        if (scanMeta.phashFailed) html += ' · pHash失败 ' + scanMeta.phashFailed;
-        if (scanMeta.clipHost) html += ' · ' + escapeHtml(scanMeta.clipHost.replace(/^https?:\/\//, '').slice(0, 40));
-        html += ' · 确认对 ' + scanMeta.confirmedPairs + ' · 疑似对 ' + scanMeta.suspectPairs;
+        if (scanMeta.generatedAt) html += ' · ' + escapeHtml(String(scanMeta.generatedAt));
+        html += ' · near ' + (scanMeta.nearGroups || 0) + ' · semantic ' + (scanMeta.semanticGroups || 0);
+        html += ' · 疑似对 ' + (scanMeta.suspectPairs || 0);
         html += '</div>';
       }
     }
@@ -1162,20 +1072,17 @@
     html += '<button type="button" data-dup-action="clear-select">取消选中</button>';
     if (mode === 'similar') {
       html += '<select id="similarMode" class="dup-select">';
-      html += '<option value="near"' + (similarMode === 'near' ? ' selected' : '') + '>近重复 (94%)</option>';
-      html += '<option value="semantic"' + (similarMode === 'semantic' ? ' selected' : '') + '>语义相似 (97%)</option>';
+      html += '<option value="all"' + (similarMode === 'all' ? ' selected' : '') + '>全部</option>';
+      html += '<option value="near"' + (similarMode === 'near' ? ' selected' : '') + '>近重复</option>';
+      html += '<option value="semantic"' + (similarMode === 'semantic' ? ' selected' : '') + '>语义相似</option>';
       html += '</select>';
-      const minPct = modeCfg ? Math.round(modeCfg.min * 100) : 90;
-      const maxPct = modeCfg ? Math.round(modeCfg.max * 100) : 99;
-      const curPct = Math.round(similarThreshold * 100);
-      html += '<label class="thresh-label">阈值 <input type="range" id="similarThreshold" min="' + minPct + '" max="' + maxPct + '" value="' + curPct + '"> <span id="thresholdVal">' + curPct + '</span>%</label>';
-      html += '<button type="button" data-dup-action="rescan">重新扫描</button>';
-      html += '<button type="button" data-dup-action="clear-cache" title="清除本机 IndexedDB 中的 CLIP 向量缓存">清除向量缓存</button>';
+      html += '<button type="button" data-dup-action="rescan">刷新索引</button>';
+      html += '<a class="btn-link" href="' + ACTIONS_SIMILAR_URL + '" target="_blank" rel="noopener" data-dup-action="rebuild-link">触发重算</a>';
     }
     html += '</div></div>';
 
     if (!sets.length && !(mode === 'similar' && suspectSets.length)) {
-      html += '<div class="empty">' + (mode === 'exact' ? '未发现 hash 重复' : '未发现视觉相似组（可调模式或阈值后重新扫描）') + '</div>';
+      html += '<div class="empty">' + (mode === 'exact' ? '未发现 hash 重复' : '未发现相似组（可点「触发重算」跑 Actions，再「刷新索引」）') + '</div>';
       html += '</div>';
       return html;
     }
@@ -1322,12 +1229,12 @@
       const mode = category;
       const sets = mode === 'dup' ? exactSets : similarSets;
 
-      if (mode === 'similar' && !similarScanned && !similarScanning) {
-        container.innerHTML = '<div class="scan-progress"><div>进入相似检测…</div></div>';
-        scanSimilarImages(false);
+      if (mode === 'similar' && !similarLoaded && !similarLoading) {
+        container.innerHTML = '<div class="scan-progress"><div>加载相似索引…</div></div>';
+        loadSimilarIndex(false);
         return;
       }
-      if (mode === 'similar' && similarScanning) return;
+      if (mode === 'similar' && similarLoading) return;
 
       filtered = flattenSets(sets);
       if (stats) {
@@ -1582,11 +1489,11 @@
         return item;
       });
       await enrichDatesFromGit(ITEMS);
-      if (clipModule) clipModule.clearMemCache();
-      similarScanned = false;
+      similarLoaded = false;
       similarSets = [];
       suspectSets = [];
       scanMeta = null;
+      similarIndexRaw = null;
       autoSmartSelected = false;
       rebuildDupIndex();
       updateCategoryCounts();
@@ -1645,13 +1552,11 @@
     const idx = ITEMS.findIndex(i => i.newRel === rel);
     if (idx >= 0) {
       const oldRel = ITEMS[idx].oldRel;
-      const oldKey = ITEMS[idx].embeddingKey;
       ITEMS[idx] = buildItem(name, oldRel);
       ITEMS[idx].blobSha = newSha;
       ITEMS[idx].commitSha = commitSha;
       ITEMS[idx].rev = Date.now();
       ITEMS[idx].size = file.size;
-      if (oldKey) getClipModule().then(m => m.invalidateCache(oldKey)).catch(() => {});
     }
     rebuildDupIndex();
     return ITEMS[idx];
@@ -1800,11 +1705,8 @@
           updateSelUI();
           filter();
         } else if (action === 'rescan') {
-          similarScanned = false;
           autoSmartSelected = false;
-          scanSimilarImages(true);
-        } else if (action === 'clear-cache') {
-          clearClipCache();
+          loadSimilarIndex(true);
         }
         return;
       }
@@ -1921,37 +1823,16 @@
       document.getElementById('patRow').classList.toggle('hidden');
     };
 
-    document.getElementById('mediaContainer').addEventListener('input', e => {
-      if (e.target.id !== 'similarThreshold') return;
-      similarThreshold = +e.target.value / 100;
-      const val = document.getElementById('thresholdVal');
-      if (val) val.textContent = String(+e.target.value);
-    });
-
-    document.getElementById('mediaContainer').addEventListener('change', async e => {
+    document.getElementById('mediaContainer').addEventListener('change', e => {
       if (e.target.id === 'similarMode') {
         similarMode = e.target.value;
-        const clip = await getClipModule();
-        similarThreshold = clip.getSimilarModeConfig(similarMode).threshold;
         autoSmartSelected = false;
-        if (ITEMS.some(i => i.phash || i.embedding)) {
-          await buildSimilarSetsAsync();
+        if (similarIndexRaw) {
+          applySimilarIndex(similarIndexRaw);
           filter();
         } else {
-          similarScanned = false;
-          scanSimilarImages(true);
+          loadSimilarIndex(true);
         }
-        return;
-      }
-      if (e.target.id !== 'similarThreshold') return;
-      similarThreshold = +e.target.value / 100;
-      autoSmartSelected = false;
-      if (ITEMS.some(i => i.phash || i.embedding)) {
-        await buildSimilarSetsAsync();
-        filter();
-      } else {
-        similarScanned = false;
-        scanSimilarImages(true);
       }
     });
 
@@ -1996,7 +1877,6 @@
     updateCategoryCounts();
     bindEvents();
     showAuthUI();
-    purgeStaleClipCache();
 
     try { await handleCallbackOnInit(); } catch (e) {
       setStatus('GitHub 登录失败: ' + e.message, 'err');

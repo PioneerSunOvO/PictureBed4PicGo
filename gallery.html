@@ -758,6 +758,17 @@
       border-radius: 8px;
       background: var(--bg-panel);
     }
+    a.btn-link {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 0.78rem;
+    }
+    a.btn-link:hover { background: var(--accent-dim, rgba(79,110,247,.12)); }
     .thresh-label { font-size: 0.78rem; color: var(--muted); }
     .dup-warn {
       padding: 10px 14px;
@@ -1245,7 +1256,7 @@
       scope: 'repo'
     };
   </script>
-  <script src="gallery-app.js?v=7998b94b"></script>
+  <script src="gallery-app.js?v=actions-sim-1"></script>
   <script>
     GalleryApp.init({ items: [], oldMap: {} });
   </script>
