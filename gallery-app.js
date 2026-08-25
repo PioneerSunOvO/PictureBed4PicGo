@@ -51,7 +51,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'lb-backdrop-4';
+  const ASSET_VERSION = 'lb-backdrop-5';
   const ACTIONS_SIMILAR_URL =
     'https://github.com/PioneerSunOvO/PictureBed4PicGo/actions/workflows/similar-index.yml';
   /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
@@ -1478,12 +1478,18 @@
       }
     }
 
+    function onClick(e) {
+      // Prevent lightbox backdrop-close when interacting with the zoom surface.
+      e.stopPropagation();
+    }
+
     wrap.addEventListener('wheel', onWheel, { passive: false });
     wrap.addEventListener('pointerdown', onPointerDown);
     wrap.addEventListener('pointermove', onPointerMove);
     wrap.addEventListener('pointerup', onPointerUp);
     wrap.addEventListener('pointercancel', onPointerUp);
     wrap.addEventListener('dblclick', onDblClick);
+    wrap.addEventListener('click', onClick);
     apply();
 
     const ctrl = {
@@ -1495,6 +1501,7 @@
         wrap.removeEventListener('pointerup', onPointerUp);
         wrap.removeEventListener('pointercancel', onPointerUp);
         wrap.removeEventListener('dblclick', onDblClick);
+        wrap.removeEventListener('click', onClick);
       }
     };
     lbZoomControllers.push(ctrl);
@@ -2208,9 +2215,11 @@
     });
 
     document.getElementById('lightbox').onclick = e => {
-      // Keep interactions on media / controls; close when clicking empty/backdrop areas.
-      if (e.target.closest('img, video, audio, iframe, .lightbox-text')) return;
-      if (e.target.closest('button, a, input, .lightbox-actions, .lightbox-caption, .lb-thumbs, .lb-pane-label')) return;
+      // Keep interactions on media / zoom surface / controls; close only on empty backdrop.
+      // .lb-zoom must be excluded: it fills the preview pane and receives pan/zoom clicks
+      // (often the target is the wrap, not the <img>), especially after scaling.
+      if (e.target.closest('.lb-zoom, img, video, audio, iframe, .lightbox-text')) return;
+      if (e.target.closest('button, a, input, .lightbox-actions, .lightbox-caption, .lightbox-toolbar, .lb-thumbs, .lb-pane-label')) return;
       closeLightbox();
     };
     document.getElementById('lightboxExit').onclick = e => {
