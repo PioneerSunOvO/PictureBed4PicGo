@@ -51,7 +51,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'lb-preview-2';
+  const ASSET_VERSION = 'lb-actions-3';
   const ACTIONS_SIMILAR_URL =
     'https://github.com/PioneerSunOvO/PictureBed4PicGo/actions/workflows/similar-index.yml';
   /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
@@ -1610,24 +1610,52 @@
       return b;
     }
 
+    const active = lbMode === 'compare'
+      ? lbCompareLeft
+      : (filtered[lightboxIdx] || null);
+    const activeUrl = active ? srcOf(active) : '';
+    const hasToken = !!token();
+
     addBtn('关闭', '', closeLightbox);
-    if (lbMode === 'single' && filtered[lightboxIdx] && (filtered[lightboxIdx].kind === 'image' || filtered[lightboxIdx].kind === 'video')) {
+
+    if (lbMode === 'single' && active && (active.kind === 'image' || active.kind === 'video')) {
       addBtn('全屏', 'primary', () => {
         lbFullscreen = true;
         renderLightboxStage();
       });
     }
+
     addBtn('复位缩放', '', () => lbZoomControllers.forEach(c => c.reset && c.reset()));
 
-    const active = lbMode === 'compare'
-      ? lbCompareLeft
-      : (filtered[lightboxIdx] || null);
     if (active) {
       addBtn('复制链接', '', () => {
-        navigator.clipboard.writeText(srcOf(active));
+        navigator.clipboard.writeText(activeUrl);
         setStatus('已复制链接', 'ok');
       });
-      if (token()) {
+      addBtn('复制文件名', '', () => {
+        navigator.clipboard.writeText(active.name);
+        setStatus('已复制文件名', 'ok');
+      });
+      addBtn('复制 Markdown', '', () => {
+        navigator.clipboard.writeText('![' + active.name + '](' + activeUrl + ')');
+        setStatus('已复制 Markdown', 'ok');
+      });
+      addBtn('新窗口', '', () => {
+        window.open(activeUrl, '_blank', 'noopener');
+      });
+      addBtn('详情', '', () => {
+        closeLightbox();
+        openDetail(active);
+      });
+      if (hasToken && lbMode === 'single') {
+        addBtn('重命名', '', () => {
+          handleAction('rename', active.newRel);
+        });
+        addBtn('替换', '', () => {
+          handleAction('replace', active.newRel);
+        });
+      }
+      if (hasToken) {
         addBtn('删除', 'danger', () => {
           deleteOne(active.newRel)
             .then(() => {
@@ -1822,12 +1850,22 @@
       const newName = prompt('新文件名（images/ 下）', cur);
       if (!newName || newName === cur) return;
       setStatus('重命名中…');
+      const wasOpen = document.getElementById('lightbox')?.classList.contains('open');
       renameFile(rel, newName)
-        .then(() => { filter(); setStatus('重命名成功', 'ok'); })
+        .then(() => {
+          filter();
+          setStatus('重命名成功', 'ok');
+          if (wasOpen) {
+            const next = itemByRel('images/' + newName.replace(/^images\//, ''));
+            if (next) openLightbox(next, lbFullscreen);
+            else closeLightbox();
+          }
+        })
         .catch(err => setStatus('重命名失败: ' + err.message, 'err'));
     } else if (action === 'replace') {
       const input = document.getElementById('replaceInput');
       input.dataset.target = rel;
+      input.dataset.fromLightbox = document.getElementById('lightbox')?.classList.contains('open') ? '1' : '';
       input.click();
     }
   }
@@ -2238,7 +2276,9 @@
       const input = document.getElementById('replaceInput');
       const file = input.files && input.files[0];
       const rel = input.dataset.target;
+      const fromLightbox = input.dataset.fromLightbox === '1';
       input.value = '';
+      input.dataset.fromLightbox = '';
       if (!file || !rel) return;
       setStatus('替换上传中…');
       try {
@@ -2247,7 +2287,8 @@
         filter();
         if (updated) {
           detailItem = itemByRel(rel) || updated;
-          openDetail(detailItem);
+          if (fromLightbox) openLightbox(detailItem, lbFullscreen);
+          else openDetail(detailItem);
         }
         setStatus('替换成功 · ' + formatBytes(file.size), 'ok');
       } catch (e) {
