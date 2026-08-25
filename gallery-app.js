@@ -50,11 +50,19 @@
   /** near | semantic | all — filters precomputed JSON groups */
   let similarMode = 'all';
   const collapsedGroups = new Set();
-  const ASSET_VERSION = 'actions-sim-1';
+  let suspectExpanded = false;
+  const ASSET_VERSION = 'lb-compare-1';
   const ACTIONS_SIMILAR_URL =
     'https://github.com/PioneerSunOvO/PictureBed4PicGo/actions/workflows/similar-index.yml';
   /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
   let repoHeadCommit = null;
+
+  /** Lightbox / compare state */
+  let lbMode = 'single'; // single | compare
+  let lbCompareLeft = null;
+  let lbCompareRight = null;
+  let lbComparePool = [];
+  let lbZoomControllers = [];
 
   function extOf(name) {
     const i = name.lastIndexOf('.');
@@ -1070,6 +1078,9 @@
     html += '<div class="dup-toolbar-actions">';
     html += '<button type="button" class="primary" data-dup-action="smart-select">智能选中待删</button>';
     html += '<button type="button" data-dup-action="clear-select">取消选中</button>';
+    if (selected.size === 2) {
+      html += '<button type="button" class="primary" data-dup-action="compare-selected">对比已选</button>';
+    }
     if (mode === 'similar') {
       html += '<select id="similarMode" class="dup-select">';
       html += '<option value="all"' + (similarMode === 'all' ? ' selected' : '') + '>全部</option>';
@@ -1096,10 +1107,18 @@
     });
 
     if (mode === 'similar' && suspectSets.length) {
-      html += '<div class="suspect-section"><div class="suspect-title">疑似相似（阈值边缘 · 需人工确认）</div>';
-      suspectSets.forEach((group, gi) => {
-        html += renderOneDupGroup(group, gi, mode, hasToken, true);
-      });
+      html += '<div class="suspect-section' + (suspectExpanded ? '' : ' collapsed') + '">';
+      html += '<div class="suspect-head" data-suspect-toggle="1">';
+      html += '<button type="button" class="dup-collapse-btn" aria-label="展开/折叠">' + (suspectExpanded ? '▾' : '▸') + '</button>';
+      html += '<div class="suspect-title">疑似相似<span class="sub">' + suspectSets.length + ' 组 · 阈值边缘</span></div>';
+      html += '</div>';
+      if (suspectExpanded) {
+        html += '<div class="suspect-body">';
+        suspectSets.forEach((group, gi) => {
+          html += renderOneDupGroup(group, gi, mode, hasToken, true);
+        });
+        html += '</div>';
+      }
       html += '</div>';
     }
 
@@ -1131,8 +1150,13 @@
     html += '</div>';
     if (!isSuspect) {
       html += '<div class="dup-group-actions">';
+      html += '<button type="button" data-group-action="compare" data-group-id="' + escapeAttr(group.id) + '">对比</button>';
       html += '<button type="button" data-group-action="smart" data-group-id="' + escapeAttr(group.id) + '">本组智能选中</button>';
       html += '<button type="button" data-group-action="all" data-group-id="' + escapeAttr(group.id) + '">全选本组</button>';
+      html += '</div>';
+    } else if (group.items.length >= 2) {
+      html += '<div class="dup-group-actions">';
+      html += '<button type="button" data-group-action="compare" data-group-id="' + escapeAttr(group.id) + '">对比</button>';
       html += '</div>';
     }
     html += '</div>';
@@ -1360,43 +1384,156 @@
     document.getElementById('appShell').classList.remove('detail-open');
   }
 
-  async function renderLightbox(item) {
-    const url = srcOf(item);
-    const content = document.getElementById('lightboxContent');
-    const caption = document.getElementById('lightboxCaption');
-    content.innerHTML = '';
-    caption.textContent = item.name;
+  function destroyLbZoom() {
+    lbZoomControllers.forEach(c => c.destroy && c.destroy());
+    lbZoomControllers = [];
+  }
 
-    if (item.kind === 'image') {
-      const img = document.createElement('img');
-      img.src = url;
-      img.alt = item.name;
-      content.appendChild(img);
-    } else if (item.kind === 'video') {
+  function attachZoomPane(wrap, mediaEl) {
+    let scale = 1;
+    let tx = 0;
+    let ty = 0;
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    function apply() {
+      mediaEl.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      wrap.classList.toggle('dragging', dragging);
+      wrap.style.cursor = scale > 1 ? (dragging ? 'grabbing' : 'grab') : 'default';
+    }
+
+    function reset() {
+      scale = 1;
+      tx = 0;
+      ty = 0;
+      apply();
+    }
+
+    function onWheel(e) {
+      if (mediaEl.tagName !== 'IMG') return;
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = wrap.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      const next = Math.min(8, Math.max(1, scale * factor));
+      if (next === scale) return;
+      const ox = (mx - rect.width / 2 - tx) / scale;
+      const oy = (my - rect.height / 2 - ty) / scale;
+      scale = next;
+      if (scale <= 1.001) {
+        scale = 1;
+        tx = 0;
+        ty = 0;
+      } else {
+        tx = mx - rect.width / 2 - ox * scale;
+        ty = my - rect.height / 2 - oy * scale;
+      }
+      apply();
+    }
+
+    function onPointerDown(e) {
+      if (mediaEl.tagName !== 'IMG' || scale <= 1) return;
+      if (e.button != null && e.button !== 0) return;
+      dragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      wrap.setPointerCapture && wrap.setPointerCapture(e.pointerId);
+      apply();
+    }
+
+    function onPointerMove(e) {
+      if (!dragging) return;
+      tx += e.clientX - lastX;
+      ty += e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      apply();
+    }
+
+    function onPointerUp(e) {
+      if (!dragging) return;
+      dragging = false;
+      try { wrap.releasePointerCapture && wrap.releasePointerCapture(e.pointerId); } catch (_) {}
+      apply();
+    }
+
+    function onDblClick(e) {
+      if (mediaEl.tagName !== 'IMG') return;
+      e.preventDefault();
+      if (scale > 1) reset();
+      else {
+        const rect = wrap.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        scale = 2.5;
+        const ox = (mx - rect.width / 2) / 1;
+        const oy = (my - rect.height / 2) / 1;
+        tx = mx - rect.width / 2 - ox * scale;
+        ty = my - rect.height / 2 - oy * scale;
+        apply();
+      }
+    }
+
+    wrap.addEventListener('wheel', onWheel, { passive: false });
+    wrap.addEventListener('pointerdown', onPointerDown);
+    wrap.addEventListener('pointermove', onPointerMove);
+    wrap.addEventListener('pointerup', onPointerUp);
+    wrap.addEventListener('pointercancel', onPointerUp);
+    wrap.addEventListener('dblclick', onDblClick);
+    apply();
+
+    const ctrl = {
+      reset,
+      destroy() {
+        wrap.removeEventListener('wheel', onWheel);
+        wrap.removeEventListener('pointerdown', onPointerDown);
+        wrap.removeEventListener('pointermove', onPointerMove);
+        wrap.removeEventListener('pointerup', onPointerUp);
+        wrap.removeEventListener('pointercancel', onPointerUp);
+        wrap.removeEventListener('dblclick', onDblClick);
+      }
+    };
+    lbZoomControllers.push(ctrl);
+    return ctrl;
+  }
+
+  async function fillNonImage(container, item, url) {
+    if (item.kind === 'video') {
       const v = document.createElement('video');
       v.src = url;
       v.controls = true;
       v.autoplay = true;
-      content.appendChild(v);
-    } else if (item.kind === 'audio') {
+      container.appendChild(v);
+      return;
+    }
+    if (item.kind === 'audio') {
       const a = document.createElement('audio');
       a.src = url;
       a.controls = true;
       a.autoplay = true;
-      content.appendChild(a);
-    } else if (item.kind === 'document') {
+      a.style.width = 'min(92vw, 480px)';
+      container.appendChild(a);
+      return;
+    }
+    if (item.kind === 'document') {
       const iframe = document.createElement('iframe');
       iframe.src = url;
+      iframe.className = 'lightbox-media-fallback';
       iframe.style.width = 'min(92vw, 900px)';
-      iframe.style.height = '75vh';
+      iframe.style.height = '70vh';
       iframe.style.border = 'none';
       iframe.style.borderRadius = '8px';
-      content.appendChild(iframe);
-    } else if (item.kind === 'text') {
+      container.appendChild(iframe);
+      return;
+    }
+    if (item.kind === 'text') {
       const pre = document.createElement('pre');
       pre.className = 'lightbox-text';
       pre.textContent = '加载中…';
-      content.appendChild(pre);
+      container.appendChild(pre);
       try {
         const res = await fetch(url);
         const text = await res.text();
@@ -1404,36 +1541,229 @@
       } catch (e) {
         pre.textContent = '无法加载文本: ' + e.message;
       }
+      return;
+    }
+    const div = document.createElement('div');
+    div.className = 'lightbox-text';
+    div.style.textAlign = 'center';
+    div.innerHTML = '<div style="font-size:4rem;margin-bottom:16px">' + TYPE_ICONS.other +
+      '</div><div>.' + escapeHtml(item.ext) + ' 文件暂不支持预览</div>' +
+      '<div style="margin-top:12px;opacity:.7"><a href="' + escapeAttr(url) +
+      '" target="_blank" rel="noopener" style="color:#93c5fd">下载 / 打开</a></div>';
+    container.appendChild(div);
+  }
+
+  function buildLbPane(item, label) {
+    const pane = document.createElement('div');
+    pane.className = 'lb-pane';
+    if (label) {
+      const lab = document.createElement('div');
+      lab.className = 'lb-pane-label';
+      lab.textContent = label;
+      pane.appendChild(lab);
+    }
+    const zoom = document.createElement('div');
+    zoom.className = 'lb-zoom';
+    pane.appendChild(zoom);
+    const url = srcOf(item);
+    if (item.kind === 'image') {
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = item.name;
+      zoom.appendChild(img);
+      attachZoomPane(zoom, img);
     } else {
-      const div = document.createElement('div');
-      div.className = 'lightbox-text';
-      div.style.textAlign = 'center';
-      div.innerHTML = '<div style="font-size:4rem;margin-bottom:16px">' + TYPE_ICONS.other +
-        '</div><div>.' + escapeHtml(item.ext) + ' 文件暂不支持预览</div>' +
-        '<div style="margin-top:12px;opacity:.7"><a href="' + escapeAttr(url) +
-        '" target="_blank" rel="noopener" style="color:#93c5fd">下载 / 打开</a></div>';
-      content.appendChild(div);
+      fillNonImage(zoom, item, url);
+    }
+    return pane;
+  }
+
+  function renderLbToolbar() {
+    const caption = document.getElementById('lightboxCaption');
+    const actions = document.getElementById('lightboxActions');
+    if (!caption || !actions) return;
+    actions.innerHTML = '';
+
+    if (lbMode === 'compare' && lbCompareLeft && lbCompareRight) {
+      caption.textContent = lbCompareLeft.name + '  ↔  ' + lbCompareRight.name;
+    } else if (filtered[lightboxIdx]) {
+      caption.textContent = filtered[lightboxIdx].name;
+    } else {
+      caption.textContent = '';
+    }
+
+    function addBtn(text, cls, fn) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = text;
+      if (cls) b.className = cls;
+      b.onclick = e => { e.stopPropagation(); fn(); };
+      actions.appendChild(b);
+      return b;
+    }
+
+    addBtn('关闭', '', closeLightbox);
+    addBtn('复位缩放', '', () => lbZoomControllers.forEach(c => c.reset && c.reset()));
+
+    const active = lbMode === 'compare'
+      ? lbCompareLeft
+      : (filtered[lightboxIdx] || null);
+    if (active) {
+      addBtn('复制链接', '', () => {
+        navigator.clipboard.writeText(srcOf(active));
+        setStatus('已复制链接', 'ok');
+      });
+      if (token()) {
+        addBtn('删除', 'danger', () => {
+          deleteOne(active.newRel)
+            .then(() => {
+              if (lbMode === 'compare') closeLightbox();
+              else {
+                filter();
+                if (!filtered.length) closeLightbox();
+                else {
+                  lightboxIdx = Math.min(lightboxIdx, filtered.length - 1);
+                  renderLightboxStage();
+                }
+              }
+            })
+            .catch(err => setStatus('删除失败: ' + err.message, 'err'));
+        });
+      }
+    }
+
+    if (lbMode === 'compare') {
+      addBtn('退出对比', 'primary', () => {
+        const keep = lbCompareLeft;
+        lbMode = 'single';
+        lbCompareLeft = null;
+        lbCompareRight = null;
+        lbComparePool = [];
+        if (keep) openLightbox(keep);
+        else closeLightbox();
+      });
     }
   }
 
+  function renderCompareThumbs(pane) {
+    if (lbComparePool.length <= 2) return;
+    const row = document.createElement('div');
+    row.className = 'lb-thumbs';
+    lbComparePool.forEach(it => {
+      if (it.newRel === lbCompareLeft.newRel) return;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'lb-thumb' + (it.newRel === lbCompareRight.newRel ? ' active' : '');
+      const img = document.createElement('img');
+      img.src = srcOf(it);
+      img.alt = it.name;
+      btn.appendChild(img);
+      btn.title = it.name;
+      btn.onclick = e => {
+        e.stopPropagation();
+        lbCompareRight = it;
+        renderLightboxStage();
+      };
+      row.appendChild(btn);
+    });
+    pane.appendChild(row);
+  }
+
+  async function renderLightboxStage() {
+    const lb = document.getElementById('lightbox');
+    const view = document.getElementById('lightboxView');
+    if (!lb || !view) return;
+    destroyLbZoom();
+    view.innerHTML = '';
+    view.classList.toggle('compare', lbMode === 'compare');
+    lb.classList.toggle('compare-mode', lbMode === 'compare');
+
+    if (lbMode === 'compare' && lbCompareLeft && lbCompareRight) {
+      const leftPane = buildLbPane(lbCompareLeft, '左');
+      const rightPane = buildLbPane(lbCompareRight, '右');
+      renderCompareThumbs(rightPane);
+      view.appendChild(leftPane);
+      view.appendChild(rightPane);
+    } else {
+      const item = filtered[lightboxIdx];
+      if (!item) {
+        closeLightbox();
+        return;
+      }
+      view.appendChild(buildLbPane(item, null));
+    }
+    renderLbToolbar();
+  }
+
   function openLightbox(item) {
+    lbMode = 'single';
+    lbCompareLeft = null;
+    lbCompareRight = null;
+    lbComparePool = [];
     lightboxIdx = filtered.findIndex(i => i.newRel === item.newRel);
+    if (lightboxIdx < 0) {
+      filtered = [item];
+      lightboxIdx = 0;
+    }
     document.getElementById('lightbox').classList.add('open');
-    renderLightbox(item);
+    renderLightboxStage();
+  }
+
+  function openCompare(left, right, pool) {
+    if (!left || !right) return;
+    lbMode = 'compare';
+    lbCompareLeft = left;
+    lbCompareRight = right;
+    lbComparePool = (pool && pool.length ? pool : [left, right]).slice();
+    lightboxIdx = filtered.findIndex(i => i.newRel === left.newRel);
+    document.getElementById('lightbox').classList.add('open');
+    renderLightboxStage();
+  }
+
+  function openGroupCompare(group) {
+    if (!group || !group.items || group.items.length < 2) return;
+    const keep = itemByRel(group.keepRel) || group.items[group.items.length - 1];
+    const other = group.items.find(i => i.newRel !== keep.newRel) || group.items[0];
+    openCompare(keep, other, group.items);
+  }
+
+  function openSelectedCompare() {
+    const rels = [...selected];
+    if (rels.length !== 2) {
+      setStatus('请恰好选中 2 张图再对比', 'err');
+      return;
+    }
+    const a = itemByRel(rels[0]);
+    const b = itemByRel(rels[1]);
+    if (!a || !b) return;
+    openCompare(a, b, [a, b]);
   }
 
   function closeLightbox() {
+    destroyLbZoom();
     document.getElementById('lightbox').classList.remove('open');
-    document.getElementById('lightboxContent').innerHTML = '';
+    document.getElementById('lightbox').classList.remove('compare-mode');
+    const view = document.getElementById('lightboxView');
+    if (view) {
+      view.innerHTML = '';
+      view.classList.remove('compare');
+    }
     const cap = document.getElementById('lightboxCaption');
     if (cap) cap.textContent = '';
+    const actions = document.getElementById('lightboxActions');
+    if (actions) actions.innerHTML = '';
     lightboxIdx = -1;
+    lbMode = 'single';
+    lbCompareLeft = null;
+    lbCompareRight = null;
+    lbComparePool = [];
   }
 
   function lightboxNav(dir) {
+    if (lbMode === 'compare') return;
     if (!filtered.length) return;
     lightboxIdx = (lightboxIdx + dir + filtered.length) % filtered.length;
-    renderLightbox(filtered[lightboxIdx]);
+    renderLightboxStage();
   }
 
   function handleAction(action, rel) {
@@ -1707,7 +2037,17 @@
         } else if (action === 'rescan') {
           autoSmartSelected = false;
           loadSimilarIndex(true);
+        } else if (action === 'compare-selected') {
+          openSelectedCompare();
         }
+        return;
+      }
+
+      const suspectHead = e.target.closest('[data-suspect-toggle]');
+      if (suspectHead) {
+        e.stopPropagation();
+        suspectExpanded = !suspectExpanded;
+        filter();
         return;
       }
 
@@ -1725,6 +2065,10 @@
         e.stopPropagation();
         const g = findGroupById(groupBtn.dataset.groupId);
         if (!g) return;
+        if (groupBtn.dataset.groupAction === 'compare') {
+          openGroupCompare(g);
+          return;
+        }
         if (groupBtn.dataset.groupAction === 'smart') {
           g.items.forEach(i => selected.delete(i.newRel));
           g.items.forEach(i => {
@@ -1755,7 +2099,8 @@
       if (cb) {
         e.stopPropagation();
         toggleSelect(rel, cb.checked);
-        card.classList.toggle('selected', cb.checked);
+        if (category === 'dup' || category === 'similar') filter();
+        else card.classList.toggle('selected', cb.checked);
         return;
       }
 
@@ -1777,17 +2122,18 @@
       handleAction(btn.dataset.action, detailItem.newRel);
     });
 
-    document.getElementById('lightboxClose').onclick = closeLightbox;
     document.getElementById('lightbox').onclick = e => {
-      if (e.target.id === 'lightbox') closeLightbox();
+      if (e.target.id === 'lightbox' || e.target.classList.contains('lightbox-stage')) closeLightbox();
     };
     document.getElementById('lightboxPrev').onclick = e => { e.stopPropagation(); lightboxNav(-1); };
     document.getElementById('lightboxNext').onclick = e => { e.stopPropagation(); lightboxNav(1); };
+    document.getElementById('lightboxActions').addEventListener('click', e => e.stopPropagation());
 
     document.addEventListener('keydown', e => {
       const lb = document.getElementById('lightbox');
       if (!lb.classList.contains('open')) return;
       if (e.key === 'Escape') closeLightbox();
+      if (lbMode === 'compare') return;
       if (e.key === 'ArrowLeft') lightboxNav(-1);
       if (e.key === 'ArrowRight') lightboxNav(1);
     });
