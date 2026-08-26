@@ -442,14 +442,19 @@
       position: absolute;
       top: 8px;
       left: 8px;
-      z-index: 4;
-      width: 16px;
-      height: 16px;
+      z-index: 8;
+      width: 18px;
+      height: 18px;
       accent-color: var(--accent);
       opacity: 0;
       transition: opacity .15s;
+      cursor: pointer;
     }
     .card:hover .card-check, .card.selected .card-check { opacity: 1; }
+    /* 重复/相似审阅：勾选框始终可见，避免被徽章挡住点不到 */
+    .dup-group .card-check {
+      opacity: 1;
+    }
     .badge {
       position: absolute;
       top: 8px;
@@ -692,7 +697,7 @@
     .keep-badge {
       position: absolute;
       top: 8px;
-      left: 8px;
+      left: 32px;
       z-index: 5;
       font-size: 0.62rem;
       font-weight: 600;
@@ -701,6 +706,7 @@
       background: rgba(5, 150, 105, 0.92);
       color: #fff;
       letter-spacing: 0.03em;
+      pointer-events: none;
     }
     .card.selected:not(.keep) { border-color: var(--danger); box-shadow: 0 0 0 2px var(--danger-dim); }
     .scan-progress {
@@ -803,6 +809,7 @@
       border-radius: 5px;
       background: rgba(79, 110, 247, 0.92);
       color: #fff;
+      pointer-events: none;
     }
     .sim-bar {
       position: absolute;
@@ -822,8 +829,9 @@
     }
     .match-path {
       position: absolute;
-      left: 8px;
+      right: 8px;
       top: 8px;
+      left: auto;
       z-index: 5;
       font-size: 0.58rem;
       font-weight: 600;
@@ -831,10 +839,15 @@
       border-radius: 4px;
       background: rgba(0,0,0,.55);
       color: #fff;
-      max-width: calc(100% - 16px);
+      max-width: calc(100% - 48px);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      pointer-events: none;
+    }
+    /* 已有相似度分时，pHash/路径标签下移，避免叠在一起 */
+    .card:has(.sim-score) .match-path {
+      top: 28px;
     }
     .scan-summary {
       font-size: 0.72rem;
@@ -1009,9 +1022,27 @@
       display: block;
     }
     .lightbox-media-fallback {
+      width: min(92vw, 900px);
+      height: 70vh;
       max-width: min(92vw, 900px);
       max-height: calc(100vh - 140px);
+      border: none;
+      border-radius: 8px;
+      background: #0f172a;
       color: #e2e8f0;
+    }
+    .media-audio-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+      padding: 24px;
+      max-width: min(92vw, 520px);
+    }
+    .media-audio-icon {
+      font-size: 3.5rem;
+      line-height: 1;
+      opacity: 0.85;
     }
     .lightbox-text {
       width: min(92vw, 800px);
@@ -1026,6 +1057,55 @@
       line-height: 1.55;
       white-space: pre-wrap;
       word-break: break-all;
+    }
+    .lightbox-text.lightbox-md {
+      font-family: var(--sans, system-ui, sans-serif);
+      font-size: 0.92rem;
+      white-space: normal;
+      word-break: break-word;
+      line-height: 1.65;
+      text-align: left;
+    }
+    .lightbox-md h1, .lightbox-md h2, .lightbox-md h3 {
+      margin: 0.8em 0 0.4em;
+      color: #f8fafc;
+      font-weight: 650;
+    }
+    .lightbox-md h1 { font-size: 1.35rem; }
+    .lightbox-md h2 { font-size: 1.15rem; }
+    .lightbox-md h3 { font-size: 1.02rem; }
+    .lightbox-md p { margin: 0.35em 0; }
+    .lightbox-md ul { margin: 0.4em 0; padding-left: 1.25em; }
+    .lightbox-md li { margin: 0.2em 0; }
+    .lightbox-md blockquote {
+      margin: 0.5em 0;
+      padding: 0.2em 0.8em;
+      border-left: 3px solid rgba(148,163,184,.5);
+      color: #cbd5e1;
+    }
+    .lightbox-md code {
+      font-family: var(--mono);
+      font-size: 0.85em;
+      background: rgba(0,0,0,.35);
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+    }
+    .lightbox-md pre.md-code {
+      background: rgba(0,0,0,.4);
+      padding: 12px 14px;
+      border-radius: 8px;
+      overflow: auto;
+      margin: 0.6em 0;
+    }
+    .lightbox-md pre.md-code code {
+      background: none;
+      padding: 0;
+    }
+    .lightbox-md a { color: #93c5fd; }
+    .lightbox-md hr {
+      border: none;
+      border-top: 1px solid rgba(148,163,184,.35);
+      margin: 1em 0;
     }
     .lightbox-nav {
       position: absolute;
@@ -1054,7 +1134,8 @@
     }
     .lightbox-nav.prev { left: 8px; }
     .lightbox-nav.next { right: 8px; }
-    .lightbox.compare-mode .lightbox-nav { display: none; }
+    /* 对比模式下仍可用左右键切换右侧候选项（有多张时） */
+    .lightbox.compare-mode:not(.compare-navable) .lightbox-nav { display: none; }
     .lightbox-toolbar {
       flex: 0 0 auto;
       display: flex;
@@ -1201,7 +1282,9 @@
       background: rgba(220,38,38,.28);
     }
     .lightbox.info-open .lightbox-view:not(.compare) .lb-zoom img,
-    .lightbox.info-open .lightbox-view:not(.compare) .lb-zoom video {
+    .lightbox.info-open .lightbox-view:not(.compare) .lb-zoom video,
+    .lightbox.info-open .lightbox-view:not(.compare) .lightbox-media-fallback,
+    .lightbox.info-open .lightbox-view:not(.compare) .lightbox-text {
       max-height: calc(100vh - 140px);
     }
     @media (max-width: 900px) {
@@ -1334,6 +1417,28 @@
       max-width: 100%;
       max-height: 100%;
       object-fit: contain;
+    }
+    .detail-preview audio {
+      width: 90%;
+      max-width: 100%;
+    }
+    .detail-preview iframe {
+      width: 100%;
+      height: 100%;
+      min-height: 240px;
+      border: none;
+      background: var(--bg);
+    }
+    .detail-preview pre.lightbox-text,
+    .detail-preview .lightbox-text {
+      width: 100%;
+      max-height: 100%;
+      margin: 0;
+      border-radius: 0;
+      font-size: 0.75rem;
+    }
+    .detail-preview .media-audio-wrap {
+      padding: 16px;
     }
     .detail-body {
       flex: 1;
@@ -1647,7 +1752,7 @@
       allowedLogins: []
     };
   </script>
-  <script src="gallery-app.js?v=lbinfo"></script>
+  <script src="gallery-app.js?v=lbgroupnav"></script>
   <script>
     GalleryApp.init({ items: [], oldMap: {} });
   </script>

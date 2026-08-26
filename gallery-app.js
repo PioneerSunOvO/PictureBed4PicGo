@@ -14,11 +14,11 @@
   const HASH_RE = /([a-f0-9]{32})(?:-\d+)?\.[^.]+$/i;
 
   const EXT_MAP = {
-    image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'heic', 'heif'],
-    video: ['mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v', 'ogv'],
-    audio: ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'opus'],
+    image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'heic', 'heif', 'tif', 'tiff', 'jfif', 'pjpeg'],
+    video: ['mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v', 'ogv', 'wmv', 'flv', '3gp'],
+    audio: ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'opus', 'wma', 'aiff', 'mid', 'midi'],
     document: ['pdf'],
-    text: ['txt', 'md', 'json', 'csv', 'xml', 'html', 'htm', 'css', 'js', 'ts', 'yaml', 'yml', 'log', 'sql', 'sh', 'bat', 'ps1']
+    text: ['txt', 'md', 'markdown', 'json', 'csv', 'xml', 'html', 'htm', 'css', 'js', 'ts', 'tsx', 'jsx', 'vue', 'yaml', 'yml', 'log', 'sql', 'sh', 'bat', 'ps1', 'ini', 'toml', 'env', 'py', 'java', 'go', 'rs', 'c', 'cpp', 'h', 'hpp', 'php', 'rb', 'swift', 'kt', 'scss', 'less', 'graphql', 'dockerfile']
   };
 
   const TYPE_ICONS = {
@@ -51,7 +51,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'lbinfo';
+  const ASSET_VERSION = 'lbgroupnav';
   const PUBLIC_PREFIX = 'images/';
   const PRIVATE_PREFIX = 'private/';
   const ACTIONS_SIMILAR_URL =
@@ -120,6 +120,8 @@
   let lbCompareLeft = null;
   let lbCompareRight = null;
   let lbComparePool = [];
+  /** When set, ←/→ navigate within this list (e.g. one similar/dup group). */
+  let lbNavPool = null;
   let lbZoomControllers = [];
 
   function extOf(name) {
@@ -133,6 +135,79 @@
       if (exts.includes(ext)) return kind;
     }
     return 'other';
+  }
+
+  function canLightboxPreview(item) {
+    if (!item) return false;
+    return item.kind === 'image' || item.kind === 'video' || item.kind === 'audio' ||
+      item.kind === 'document' || item.kind === 'text';
+  }
+
+  function supportsLbFullscreen(item) {
+    if (!item) return false;
+    return item.kind === 'image' || item.kind === 'video' ||
+      (item.kind === 'document' && item.ext === 'pdf');
+  }
+
+  function textFetchUrl(item, previewUrl) {
+    if (previewUrl && previewUrl.startsWith('blob:')) return previewUrl;
+    const share = shareUrlOf(item);
+    return share || previewUrl;
+  }
+
+  /** Lightweight Markdown → HTML for gallery preview (no external deps). */
+  function renderSimpleMarkdown(src) {
+    const lines = String(src || '').replace(/\r\n/g, '\n').split('\n');
+    const out = [];
+    let inCode = false;
+    let codeBuf = [];
+    let inList = false;
+
+    function closeList() {
+      if (inList) { out.push('</ul>'); inList = false; }
+    }
+
+    function inlineFormat(s) {
+      return escapeHtml(s)
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+        .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (/^```/.test(line)) {
+        if (inCode) {
+          out.push('<pre class="md-code"><code>' + escapeHtml(codeBuf.join('\n')) + '</code></pre>');
+          codeBuf = [];
+          inCode = false;
+        } else {
+          closeList();
+          inCode = true;
+        }
+        continue;
+      }
+      if (inCode) { codeBuf.push(line); continue; }
+
+      if (/^\s*[-*+]\s+/.test(line)) {
+        if (!inList) { out.push('<ul>'); inList = true; }
+        out.push('<li>' + inlineFormat(line.replace(/^\s*[-*+]\s+/, '')) + '</li>');
+        continue;
+      }
+      closeList();
+
+      if (/^###\s+/.test(line)) out.push('<h3>' + inlineFormat(line.slice(4)) + '</h3>');
+      else if (/^##\s+/.test(line)) out.push('<h2>' + inlineFormat(line.slice(3)) + '</h2>');
+      else if (/^#\s+/.test(line)) out.push('<h1>' + inlineFormat(line.slice(2)) + '</h1>');
+      else if (/^>\s?/.test(line)) out.push('<blockquote>' + inlineFormat(line.replace(/^>\s?/, '')) + '</blockquote>');
+      else if (/^---+$/.test(line.trim())) out.push('<hr>');
+      else if (!line.trim()) out.push('<br>');
+      else out.push('<p>' + inlineFormat(line) + '</p>');
+    }
+    if (inCode) out.push('<pre class="md-code"><code>' + escapeHtml(codeBuf.join('\n')) + '</code></pre>');
+    closeList();
+    return out.join('');
   }
 
   function validDate(y, mo, d, h, mi, s) {
@@ -1450,6 +1525,9 @@
       if (mode === 'similar' && similarLoading) return;
 
       filtered = flattenSets(sets);
+      if (mode === 'similar' && suspectSets.length) {
+        filtered = filtered.concat(flattenSets(suspectSets));
+      }
       if (stats) {
         const setLabel = mode === 'dup' ? '重复组' : '相似组';
         let statHtml = setLabel + ' <strong>' + sets.length + '</strong> · 共 <strong>' + filtered.length + '</strong> 张';
@@ -1684,16 +1762,14 @@
     const body = document.getElementById('detailBody');
     const actions = document.getElementById('detailActions');
 
+    preview.innerHTML = '';
     if (item.kind === 'image') {
       const img = document.createElement('img');
       img.alt = item.name;
       img.src = url;
-      preview.innerHTML = '';
       preview.appendChild(img);
-    } else if (item.kind === 'video') {
-      preview.innerHTML = '<video controls src="' + escapeAttr(url) + '"></video>';
-    } else if (item.kind === 'audio') {
-      preview.innerHTML = '<audio controls src="' + escapeAttr(url) + '" style="width:90%"></audio>';
+    } else if (canLightboxPreview(item)) {
+      await fillNonImage(preview, item, url);
     } else {
       preview.innerHTML = '<span class="thumb-icon" style="font-size:3rem">' + TYPE_ICONS[item.kind] + '</span>';
     }
@@ -1720,9 +1796,28 @@
     document.getElementById('appShell').classList.remove('detail-open');
   }
 
+  function findGroupContaining(item) {
+    if (!item) return null;
+    const pools = [];
+    if (category === 'dup') pools.push(...exactSets);
+    else if (category === 'similar') {
+      pools.push(...similarSets);
+      pools.push(...suspectSets);
+    } else {
+      pools.push(...exactSets, ...similarSets, ...suspectSets);
+    }
+    return pools.find(g => g.items && g.items.some(i => i.newRel === item.newRel)) || null;
+  }
+
+  function lightboxNavList() {
+    if (lbNavPool && lbNavPool.length) return lbNavPool;
+    return filtered;
+  }
+
   function currentLightboxItem() {
     if (lbMode === 'compare') return lbCompareLeft;
-    return filtered[lightboxIdx] || null;
+    const list = lightboxNavList();
+    return list[lightboxIdx] || null;
   }
 
   function closeLbInfo() {
@@ -1937,45 +2032,56 @@
   }
 
   async function fillNonImage(container, item, url) {
+    const openUrl = shareUrlOf(item) || url;
     if (item.kind === 'video') {
       const v = document.createElement('video');
       v.src = url;
       v.controls = true;
+      v.playsInline = true;
       v.autoplay = true;
       container.appendChild(v);
       return;
     }
     if (item.kind === 'audio') {
+      const wrap = document.createElement('div');
+      wrap.className = 'media-audio-wrap';
+      wrap.innerHTML = '<div class="media-audio-icon">' + TYPE_ICONS.audio + '</div>';
       const a = document.createElement('audio');
       a.src = url;
       a.controls = true;
       a.autoplay = true;
       a.style.width = 'min(92vw, 480px)';
-      container.appendChild(a);
+      wrap.appendChild(a);
+      container.appendChild(wrap);
       return;
     }
     if (item.kind === 'document') {
       const iframe = document.createElement('iframe');
       iframe.src = url;
       iframe.className = 'lightbox-media-fallback';
-      iframe.style.width = 'min(92vw, 900px)';
-      iframe.style.height = '70vh';
-      iframe.style.border = 'none';
-      iframe.style.borderRadius = '8px';
+      iframe.title = item.name;
       container.appendChild(iframe);
       return;
     }
     if (item.kind === 'text') {
-      const pre = document.createElement('pre');
-      pre.className = 'lightbox-text';
-      pre.textContent = '加载中…';
-      container.appendChild(pre);
+      const isMd = item.ext === 'md' || item.ext === 'markdown';
+      const wrap = document.createElement('div');
+      wrap.className = isMd ? 'lightbox-text lightbox-md' : 'lightbox-text';
+      wrap.textContent = '加载中…';
+      container.appendChild(wrap);
       try {
-        const res = await fetch(url);
+        const fetchUrl = textFetchUrl(item, url);
+        const res = await fetch(fetchUrl);
+        if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
         const text = await res.text();
-        pre.textContent = text.length > 50000 ? text.slice(0, 50000) + '\n\n…(已截断)' : text;
+        const clipped = text.length > 50000 ? text.slice(0, 50000) + '\n\n…(已截断)' : text;
+        if (isMd) {
+          wrap.innerHTML = renderSimpleMarkdown(clipped);
+        } else {
+          wrap.textContent = clipped;
+        }
       } catch (e) {
-        pre.textContent = '无法加载文本: ' + e.message;
+        wrap.textContent = '无法加载文本: ' + e.message;
       }
       return;
     }
@@ -1983,8 +2089,8 @@
     div.className = 'lightbox-text';
     div.style.textAlign = 'center';
     div.innerHTML = '<div style="font-size:4rem;margin-bottom:16px">' + TYPE_ICONS.other +
-      '</div><div>.' + escapeHtml(item.ext) + ' 文件暂不支持预览</div>' +
-      '<div style="margin-top:12px;opacity:.7"><a href="' + escapeAttr(url) +
+      '</div><div>.' + escapeHtml(item.ext) + ' 文件暂不支持在线预览</div>' +
+      '<div style="margin-top:12px;opacity:.7"><a href="' + escapeAttr(openUrl) +
       '" target="_blank" rel="noopener" style="color:#93c5fd">下载 / 打开</a></div>';
     container.appendChild(div);
   }
@@ -2029,10 +2135,9 @@
 
     if (lbMode === 'compare' && lbCompareLeft && lbCompareRight) {
       caption.textContent = lbCompareLeft.name + '  ↔  ' + lbCompareRight.name;
-    } else if (filtered[lightboxIdx]) {
-      caption.textContent = filtered[lightboxIdx].name;
     } else {
-      caption.textContent = '';
+      const cur = lightboxNavList()[lightboxIdx];
+      caption.textContent = cur ? cur.name : '';
     }
 
     function addBtn(text, cls, fn) {
@@ -2047,14 +2152,14 @@
 
     const active = lbMode === 'compare'
       ? lbCompareLeft
-      : (filtered[lightboxIdx] || null);
+      : (lightboxNavList()[lightboxIdx] || null);
     const previewUrl = active ? srcOf(active) : '';
     const shareUrl = active ? shareUrlOf(active) : '';
     const hasToken = !!token();
 
     addBtn('关闭', '', closeLightbox);
 
-    if (lbMode === 'single' && active && (active.kind === 'image' || active.kind === 'video')) {
+    if (lbMode === 'single' && active && supportsLbFullscreen(active)) {
       addBtn('全屏', 'primary', () => {
         closeLbInfo();
         lbFullscreen = true;
@@ -2062,31 +2167,35 @@
       });
     }
 
-    addBtn('复位缩放', '', () => lbZoomControllers.forEach(c => c.reset && c.reset()));
+    if (active && active.kind === 'image') {
+      addBtn('复位缩放', '', () => lbZoomControllers.forEach(c => c.reset && c.reset()));
+    }
 
     if (active) {
-      addBtn(active.isPrivate ? '复制私链' : '复制链接', 'primary', () => {
-        void copyItemLink(active);
-      });
-      if (!active.isPrivate) {
-        addBtn('复制 Markdown', '', () => {
-          navigator.clipboard.writeText('![' + active.name + '](' + shareUrl + ')');
-          setStatus('已复制 Markdown（' + sourceModeLabel(currentSourceMode()) + '）', 'ok');
+      if (!lbInfoOpen) {
+        addBtn(active.isPrivate ? '复制私链' : '复制链接', 'primary', () => {
+          void copyItemLink(active);
+        });
+        if (!active.isPrivate) {
+          addBtn('复制 Markdown', '', () => {
+            navigator.clipboard.writeText('![' + active.name + '](' + shareUrl + ')');
+            setStatus('已复制 Markdown（' + sourceModeLabel(currentSourceMode()) + '）', 'ok');
+          });
+        }
+        addBtn('复制文件名', '', () => {
+          navigator.clipboard.writeText(active.name);
+          setStatus('已复制文件名', 'ok');
+        });
+        addBtn('新窗口', '', () => {
+          const openUrl = shareUrl || previewUrl;
+          if (!openUrl) { setStatus('链接未就绪', 'err'); return; }
+          window.open(openUrl, '_blank', 'noopener');
         });
       }
-      addBtn('复制文件名', '', () => {
-        navigator.clipboard.writeText(active.name);
-        setStatus('已复制文件名', 'ok');
-      });
-      addBtn('新窗口', '', () => {
-        const openUrl = shareUrl || previewUrl;
-        if (!openUrl) { setStatus('链接未就绪', 'err'); return; }
-        window.open(openUrl, '_blank', 'noopener');
-      });
       addBtn(lbInfoOpen ? '收起详情' : '详情', lbInfoOpen ? 'primary' : '', () => {
         void toggleLbInfo().then(() => renderLbToolbar());
       });
-      if (hasToken && lbMode === 'single') {
+      if (!lbInfoOpen && hasToken && lbMode === 'single') {
         addBtn('重命名', '', () => {
           handleAction('rename', active.newRel);
         });
@@ -2094,18 +2203,22 @@
           handleAction('replace', active.newRel);
         });
       }
-      if (hasToken) {
+      if (!lbInfoOpen && hasToken) {
         addBtn('删除', 'danger', () => {
           deleteOne(active.newRel)
             .then(() => {
               if (lbMode === 'compare') closeLightbox();
               else {
-                void filter();
-                if (!filtered.length) closeLightbox();
-                else {
-                  lightboxIdx = Math.min(lightboxIdx, filtered.length - 1);
-                  renderLightboxStage();
-                }
+                const list = lightboxNavList().filter(i => i.newRel !== active.newRel);
+                if (lbNavPool) lbNavPool = list;
+                void filter().then(() => {
+                  if (!list.length) {
+                    closeLightbox();
+                    return;
+                  }
+                  lightboxIdx = Math.min(lightboxIdx, list.length - 1);
+                  void renderLightboxStage();
+                });
               }
             })
             .catch(err => setStatus('删除失败: ' + err.message, 'err'));
@@ -2160,6 +2273,9 @@
     view.classList.toggle('compare', lbMode === 'compare');
     lb.classList.toggle('compare-mode', lbMode === 'compare');
     lb.classList.toggle('fullscreen-mode', lbFullscreen);
+    const compareNavable = lbMode === 'compare' &&
+      lbComparePool.filter(i => !lbCompareLeft || i.newRel !== lbCompareLeft.newRel).length > 1;
+    lb.classList.toggle('compare-navable', compareNavable);
     if (exitBtn) exitBtn.hidden = !lbFullscreen;
 
     if (lbMode === 'compare') {
@@ -2176,7 +2292,8 @@
       view.appendChild(leftPane);
       view.appendChild(rightPane);
     } else {
-      const item = filtered[lightboxIdx];
+      const list = lightboxNavList();
+      const item = list[lightboxIdx];
       if (!item) {
         closeLightbox();
         return;
@@ -2188,16 +2305,25 @@
     void syncLbInfoIfOpen();
   }
 
-  function openLightbox(item, fullscreen) {
+  function openLightbox(item, fullscreen, pool) {
     closeDetail();
     lbMode = 'single';
     lbFullscreen = !!fullscreen;
     lbCompareLeft = null;
     lbCompareRight = null;
     lbComparePool = [];
-    lightboxIdx = filtered.findIndex(i => i.newRel === item.newRel);
+    const group = (!pool || !pool.length) ? findGroupContaining(item) : null;
+    if (pool && pool.length) {
+      lbNavPool = pool.slice();
+    } else if (group && group.items && group.items.length > 1) {
+      lbNavPool = group.items.slice();
+    } else {
+      lbNavPool = null;
+    }
+    const list = lightboxNavList();
+    lightboxIdx = list.findIndex(i => i.newRel === item.newRel);
     if (lightboxIdx < 0) {
-      filtered = [item];
+      lbNavPool = [item];
       lightboxIdx = 0;
     }
     document.getElementById('lightbox').classList.add('open');
@@ -2216,7 +2342,8 @@
     lbCompareLeft = left;
     lbCompareRight = right;
     lbComparePool = (pool && pool.length ? pool : [left, right]).slice();
-    lightboxIdx = filtered.findIndex(i => i.newRel === left.newRel);
+    lbNavPool = lbComparePool.slice();
+    lightboxIdx = lbNavPool.findIndex(i => i.newRel === left.newRel);
     document.getElementById('lightbox').classList.add('open');
     renderLightboxStage();
   }
@@ -2265,13 +2392,24 @@
     lbCompareLeft = null;
     lbCompareRight = null;
     lbComparePool = [];
+    lbNavPool = null;
   }
 
   function lightboxNav(dir) {
-    if (lbMode === 'compare') return;
-    if (!filtered.length) return;
-    lightboxIdx = (lightboxIdx + dir + filtered.length) % filtered.length;
-    renderLightboxStage();
+    if (lbMode === 'compare') {
+      const pool = lbComparePool.filter(i => i.newRel !== lbCompareLeft.newRel);
+      if (pool.length < 2) return;
+      const idx = pool.findIndex(i => i.newRel === lbCompareRight.newRel);
+      const next = pool[(Math.max(0, idx) + dir + pool.length) % pool.length];
+      if (!next) return;
+      lbCompareRight = next;
+      void renderLightboxStage();
+      return;
+    }
+    const list = lightboxNavList();
+    if (!list.length) return;
+    lightboxIdx = (lightboxIdx + dir + list.length) % list.length;
+    void renderLightboxStage();
   }
 
   function handleAction(action, rel) {
@@ -2652,7 +2790,7 @@
         return;
       }
 
-      if (item && (item.kind === 'image' || item.kind === 'video')) {
+      if (item && canLightboxPreview(item)) {
         openLightbox(item, false);
         return;
       }
@@ -2671,7 +2809,7 @@
 
     document.getElementById('lightbox').onclick = e => {
       // Close on backdrop / toolbar empty area; keep media, actions & info panel interactive.
-      if (e.target.closest('.lb-zoom img, .lb-zoom video, img, video, audio, iframe, .lightbox-text')) return;
+      if (e.target.closest('.lb-zoom img, .lb-zoom video, img, video, audio, iframe, .lightbox-text, .media-audio-wrap')) return;
       if (e.target.closest('button, a, input, .lightbox-actions, .lightbox-info, .lb-thumbs, .lb-pane-label')) return;
       closeLightbox();
     };
@@ -2719,7 +2857,11 @@
         }
         return;
       }
-      if (lbMode === 'compare') return;
+      if (lbMode === 'compare') {
+        if (e.key === 'ArrowLeft') lightboxNav(-1);
+        if (e.key === 'ArrowRight') lightboxNav(1);
+        return;
+      }
       if (e.key === 'ArrowLeft') lightboxNav(-1);
       if (e.key === 'ArrowRight') lightboxNav(1);
     });
