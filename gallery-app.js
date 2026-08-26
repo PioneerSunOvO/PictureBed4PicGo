@@ -76,7 +76,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'hashfix';
+  const ASSET_VERSION = 'tagui';
   /** 公开图床根路径（PicGo 默认）；Markdown 外链指向此目录 */
   const PUBLIC_PREFIX = 'images/';
   /** 私有目录；列表需登录，预览走 blob 或可选 Worker 代理 */
@@ -109,6 +109,8 @@
   let tagsSalt = null;
   let tagsUnlocked = false;
   let tagsBusy = false;
+  let tagsPersistTimer = null;
+  let tagPopoverItem = null;
 
   function securityCfg() { return global.SECURITY || {}; }
   function requireGalleryLogin() { return securityCfg().requireLogin !== false; }
@@ -689,7 +691,115 @@
     /* 标签入口在卡片右上角，不再使用顶部工具栏 */
   }
 
-  let tagPopoverItem = null;
+  async function flushTagsPersist() {
+    if (!tagsUnlocked || !tagsCryptoKey) return;
+    if (tagsPersistTimer) {
+      clearTimeout(tagsPersistTimer);
+      tagsPersistTimer = null;
+    }
+    if (tagsBusy) {
+      scheduleTagsPersist();
+      return;
+    }
+    tagsBusy = true;
+    try {
+      await persistTagsEnvelope();
+      setStatus('标签已加密保存到仓库', 'ok');
+    } catch (e) {
+      setStatus('标签保存失败: ' + e.message, 'err');
+    } finally {
+      tagsBusy = false;
+    }
+  }
+
+  function scheduleTagsPersist() {
+    if (tagsPersistTimer) clearTimeout(tagsPersistTimer);
+    tagsPersistTimer = setTimeout(() => {
+      tagsPersistTimer = null;
+      void flushTagsPersist();
+    }, 700);
+  }
+
+  function cardUserTagsInnerHtml(item) {
+    const id = item._tagId || tagIdCache.get(item.newRel);
+    const tags = (tagsUnlocked && id) ? (tagsById.get(id) || []) : [];
+    const hasEncrypted = !!(id && tagsEnvelope && tagsEnvelope.entries && tagsEnvelope.entries[id]);
+    if (tagsUnlocked && tags.length > 1) {
+      let html = '<span class="tag-stack">';
+      tags.slice(0, 8).forEach(t => {
+        html += '<span class="tag-chip tag-stack-item">' + escapeHtml(t) + '</span>';
+      });
+      if (tags.length > 8) html += '<span class="tag-chip tag-stack-item tag-more">+' + (tags.length - 8) + '</span>';
+      html += '</span>';
+      return html;
+    }
+    if (tagsUnlocked && tags.length === 1) {
+      return '<span class="tag-chip">' + escapeHtml(tags[0]) + '</span>';
+    }
+    if (hasEncrypted && !tagsUnlocked) {
+      return '<span class="tag-chip tag-locked" title="点击输入口令解锁">🔒</span>';
+    }
+    return '<span class="tag-chip tag-add-hint">+标签</span>';
+  }
+
+  function cardUserTagsTriggerHtml(item) {
+    if (!token()) return '';
+    const id = item._tagId || tagIdCache.get(item.newRel);
+    const tags = (tagsUnlocked && id) ? (tagsById.get(id) || []) : [];
+    const hasEncrypted = !!(id && tagsEnvelope && tagsEnvelope.entries && tagsEnvelope.entries[id]);
+    const hasVisibleTags = tagsUnlocked && tags.length > 0;
+    const revealOnHover = !hasVisibleTags;
+    const cls = 'card-user-tags' + (revealOnHover ? ' card-user-tags--reveal' : '');
+    return '<button type="button" class="' + cls + '" data-action="tag-edit" title="编辑标签（不含「私有」）">' +
+      cardUserTagsInnerHtml(item) + '</button>';
+  }
+
+  function patchItemTagsUI(item) {
+    if (!item || !item.newRel) return;
+    document.querySelectorAll('[data-rel]').forEach(el => {
+      if (el.dataset.rel !== item.newRel) return;
+      const badges = el.querySelector('.card-badges');
+      if (badges) {
+        const old = badges.querySelector('.card-user-tags');
+        const wrap = document.createElement('div');
+        wrap.innerHTML = cardUserTagsTriggerHtml(item);
+        const neu = wrap.firstElementChild;
+        if (neu) {
+          if (old) old.replaceWith(neu);
+          else badges.appendChild(neu);
+        } else if (old) old.remove();
+        return;
+      }
+      const listName = el.querySelector('.list-info .name');
+      if (listName) {
+        const old = listName.querySelector('.card-user-tags');
+        const wrap = document.createElement('div');
+        wrap.innerHTML = cardUserTagsTriggerHtml(item);
+        const neu = wrap.firstElementChild;
+        if (neu) {
+          if (old) old.replaceWith(neu);
+          else listName.appendChild(neu);
+        } else if (old) old.remove();
+      }
+    });
+  }
+
+  async function patchDetailTagEditor(item) {
+    if (!item || !detailItem || detailItem.newRel !== item.newRel) return;
+    const body = document.getElementById('detailBody');
+    if (!body) return;
+    const tags = await tagsForItem(item);
+    const editor = body.querySelector('.tag-editor');
+    const metaHtml = buildDetailMetaHtml(item);
+    if (editor) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = buildTagEditorHtml(item, tags);
+      const neu = tmp.firstElementChild;
+      if (neu) editor.replaceWith(neu);
+    } else {
+      body.innerHTML = metaHtml + buildTagEditorHtml(item, tags);
+    }
+  }
 
   /** 从 GitHub 拉取 meta/asset-tags.enc.json；若 session 有口令则尝试自动解锁 */
   async function loadTagsEnvelope() {
@@ -815,7 +925,7 @@
     updateTagsUnlockUI();
   }
 
-  /** 更新某文件的标签列表并持久化；tagsArr 为空则删除该 entry */
+  /** 更新某文件的标签列表；UI 即时刷新，GitHub 持久化防抖合并 */
   async function setItemTags(item, tagsArr) {
     if (!item) return;
     if (!tagsUnlocked || !tagsCryptoKey) throw new Error('请先解锁标签口令');
@@ -824,17 +934,14 @@
     const list = normalizeTagList(tagsArr);
     if (list.length) tagsById.set(id, list);
     else tagsById.delete(id);
-    tagsBusy = true;
-    try {
-      await persistTagsEnvelope();
-      setStatus('标签已加密保存到仓库', 'ok');
-    } finally {
-      tagsBusy = false;
-    }
-    void filter();
-    if (detailItem && detailItem.newRel === item.newRel) void openDetail(item);
-    if (lbInfoOpen) void syncLbInfoIfOpen();
+
+    patchItemTagsUI(item);
+    if (detailItem && detailItem.newRel === item.newRel) void patchDetailTagEditor(item);
     if (tagPopoverItem && tagPopoverItem.newRel === item.newRel) void refreshTagPopover();
+    if (lbInfoOpen) void syncLbInfoIfOpen();
+
+    setStatus('标签已更新 · 保存中…', '');
+    scheduleTagsPersist();
   }
 
   /** 重命名文件时迁移密文 entry 键（oldId → newId） */
@@ -845,7 +952,7 @@
     if (!tagsById.has(oldId)) return;
     tagsById.set(newId, tagsById.get(oldId));
     tagsById.delete(oldId);
-    await persistTagsEnvelope();
+    scheduleTagsPersist();
   }
 
   function itemTagsChipHtml(tags, lockedHint) {
@@ -906,8 +1013,10 @@
       e.preventDefault();
       await promptUnlockTags();
       if (tagsUnlocked) {
-        void filter();
-        if (tagPopoverItem) await refreshTagPopover();
+        if (tagPopoverItem) {
+          patchItemTagsUI(tagPopoverItem);
+          await refreshTagPopover();
+        }
       }
       return;
     }
@@ -1930,30 +2039,6 @@
     return '<span class="private-badge" title="私有：可复制私链到其他设备，不建议写进公开 Markdown">私有</span>';
   }
 
-  function cardUserTagsTriggerHtml(item) {
-    if (!token()) return '';
-    const id = item._tagId || tagIdCache.get(item.newRel);
-    const tags = (tagsUnlocked && id) ? (tagsById.get(id) || []) : [];
-    const hasEncrypted = !!(id && tagsEnvelope && tagsEnvelope.entries && tagsEnvelope.entries[id]);
-    let inner = '';
-    if (tagsUnlocked) {
-      if (tags.length) {
-        inner = tags.slice(0, 4).map(t =>
-          '<span class="tag-chip">' + escapeHtml(t) + '</span>'
-        ).join('');
-        if (tags.length > 4) inner += '<span class="tag-chip tag-more">+' + (tags.length - 4) + '</span>';
-      } else {
-        inner = '<span class="tag-chip tag-add-hint">+标签</span>';
-      }
-    } else if (hasEncrypted) {
-      inner = '<span class="tag-chip tag-locked" title="点击输入口令解锁">🔒</span>';
-    } else {
-      inner = '<span class="tag-chip tag-add-hint">+标签</span>';
-    }
-    return '<button type="button" class="card-user-tags" data-action="tag-edit" title="编辑标签（不含「私有」）">' +
-      inner + '</button>';
-  }
-
   function cardBadgesHtml(item) {
     let html = '<div class="card-badges">';
     if (item.isPrivate) html += privateBadgeHtml();
@@ -1996,7 +2081,7 @@
     if (!tagsUnlocked) {
       await promptUnlockTags();
       if (!tagsUnlocked) return;
-      void filter();
+      patchItemTagsUI(item);
     }
     tagPopoverItem = item;
     const pop = document.getElementById('tagPopover');
@@ -3868,6 +3953,10 @@
         setStatus('替换失败: ' + e.message, 'err');
       }
     };
+
+    window.addEventListener('pagehide', () => {
+      if (tagsPersistTimer) void flushTagsPersist();
+    });
   }
 
   async function handleCallbackOnInit() {
