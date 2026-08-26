@@ -78,7 +78,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'typefix';
+  const ASSET_VERSION = 'lbfix';
   /** 公开图床根路径（PicGo 默认）；Markdown 外链指向此目录 */
   const PUBLIC_PREFIX = 'images/';
   /** 私有目录；列表需登录，预览走 blob 或可选 Worker 代理 */
@@ -99,6 +99,8 @@
   let routeQuiet = false;
   /** init 完成且 ITEMS 已加载后才写入地址栏 hash */
   let routeReady = false;
+  /** syncAppRoute 写入 hash 时抑制 hashchange，避免收起详情侧栏时重复 openLightbox 重绘 */
+  let suppressRouteHash = 0;
   const ACTIONS_SIMILAR_URL =
     'https://github.com/PioneerSunOvO/PictureBed4PicGo/actions/workflows/similar-index.yml';
   /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
@@ -247,6 +249,7 @@
     const body = hash.replace(/^#/, '');
     const cur = (location.hash || '').replace(/^#/, '');
     if (body === cur) return;
+    suppressRouteHash++;
     routeQuiet = true;
     try {
       const url = location.pathname + location.search + hash;
@@ -258,6 +261,7 @@
       }
     } finally {
       routeQuiet = false;
+      setTimeout(() => { suppressRouteHash = Math.max(0, suppressRouteHash - 1); }, 0);
     }
   }
 
@@ -319,11 +323,24 @@
         else if (lbOpen) closeLightbox({ sync: false });
       } else if (wantPreview) {
         const item = itemByRel(parsed.rel);
+        const cur = typeof currentLightboxItem === 'function' ? currentLightboxItem() : null;
+        const samePreview = lbOpen && lbMode === 'single' && item && cur && cur.newRel === item.newRel;
         if (item) {
-          openLightbox(item, parsed.fs);
-          if (parsed.info) await openLbInfo(item);
-          else closeLbInfo({ sync: false });
-        } else if (lbOpen) closeLightbox({ sync: false });
+          if (!samePreview) {
+            openLightbox(item, parsed.fs);
+          } else if (lbFullscreen !== !!parsed.fs) {
+            lbFullscreen = !!parsed.fs;
+            void renderLightboxStage();
+          }
+          if (parsed.info) {
+            if (!lbInfoOpen) await openLbInfo(item);
+          } else if (lbInfoOpen) {
+            closeLbInfo({ sync: false });
+            renderLbToolbar();
+          }
+        } else if (lbOpen) {
+          closeLightbox({ sync: false });
+        }
       } else if (wantDetail) {
         if (lbOpen) closeLightbox({ sync: false });
         const item = itemByRel(parsed.rel);
@@ -3670,6 +3687,10 @@
         void toggleLbInfo().then(() => renderLbToolbar());
       });
       if (!lbInfoOpen && hasToken && lbMode === 'single') {
+        let tagBtn;
+        tagBtn = addBtn('标签', '', () => {
+          void openTagEditorForItem(active, tagBtn);
+        });
         addBtn('重命名', '', () => {
           handleAction('rename', active.newRel);
         });
@@ -3850,6 +3871,7 @@
   /** 关闭灯箱并 syncAppRoute，回到当前菜单列表 hash */
   function closeLightbox(opts) {
     destroyLbZoom();
+    closeTagPopover();
     closeLbInfo({ sync: false });
     const lb = document.getElementById('lightbox');
     lb.classList.remove('open');
@@ -4240,7 +4262,7 @@
       void applyRouteFromHash();
     });
     window.addEventListener('hashchange', () => {
-      if (!routeReady || routeQuiet) return;
+      if (!routeReady || routeQuiet || suppressRouteHash > 0) return;
       void applyRouteFromHash();
     });
 
