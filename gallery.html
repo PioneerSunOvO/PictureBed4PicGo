@@ -1562,19 +1562,81 @@
     .card .private-badge {
       position: static;
       flex: 0 0 auto;
+      pointer-events: none;
     }
+    .card-user-tags {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      justify-content: flex-end;
+      align-items: center;
+      border: none;
+      background: transparent;
+      padding: 0;
+      margin: 0;
+      cursor: pointer;
+      max-width: 100%;
+      font: inherit;
+    }
+    .card-user-tags:hover .tag-chip { filter: brightness(1.05); }
+    .tag-chip.tag-add-hint {
+      background: rgba(255,255,255,.88);
+      color: var(--accent);
+      border: 1px dashed rgba(79,110,247,.45);
+    }
+    .list-info .card-user-tags {
+      vertical-align: middle;
+      margin-left: 4px;
+    }
+    .tag-popover {
+      position: fixed;
+      z-index: 1200;
+      width: min(300px, calc(100vw - 24px));
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 12px 14px;
+    }
+    .tag-popover-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .tag-popover-head h3 {
+      margin: 0;
+      font-size: 0.82rem;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tag-popover-close {
+      border: none;
+      background: transparent;
+      font-size: 1.2rem;
+      line-height: 1;
+      cursor: pointer;
+      color: var(--muted);
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+    .tag-popover-close:hover { background: var(--bg-hover); color: var(--text); }
+    .tag-popover .tag-editor { margin-top: 0; padding-top: 0; border-top: none; }
+    .tags-lock-hint { display: none !important; }
     .card-badges {
       position: absolute;
       top: 8px;
       right: 8px;
       left: 32px;
-      z-index: 5;
+      z-index: 6;
       display: flex;
       flex-wrap: wrap;
       gap: 4px;
       justify-content: flex-end;
       align-items: flex-start;
-      pointer-events: none;
       max-width: calc(100% - 40px);
     }
     .card:not(:has(.card-check)) .card-badges {
@@ -1859,8 +1921,6 @@
           <button type="button" id="viewList" title="列表">☰</button>
         </div>
         <div class="hidden" id="manageBar" style="display:flex;gap:6px;align-items:center;">
-          <span class="tags-lock-hint" id="tagsLockHint">标签未解锁</span>
-          <button type="button" id="tagsUnlockBtn">解锁标签</button>
           <label style="font-size:.8rem;display:flex;align-items:center;gap:4px;cursor:pointer;">
             <input type="checkbox" id="selectAll"> 全选
           </label>
@@ -1916,6 +1976,14 @@
 
   <input type="file" id="replaceInput" accept="*/*">
 
+  <div class="tag-popover" id="tagPopover" hidden>
+    <div class="tag-popover-head">
+      <h3 id="tagPopoverTitle">编辑标签</h3>
+      <button type="button" class="tag-popover-close" id="tagPopoverClose" aria-label="关闭">&times;</button>
+    </div>
+    <div id="tagPopoverBody"></div>
+  </div>
+
   <script>
     const REPO = { owner: 'PioneerSunOvO', repo: 'PictureBed4PicGo', branch: 'master' };
     const OAUTH = {
@@ -1933,7 +2001,7 @@
       allowedLogins: []
     };
   </script>
-  <script src="gallery-app.js?v=selscope"></script>
+  <script src="gallery-app.js?v=hashfix"></script>
   <script>
     GalleryApp.init({ items: [], oldMap: {} });
   </script>

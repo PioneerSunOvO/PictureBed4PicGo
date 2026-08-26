@@ -1,7 +1,20 @@
-/* PictureBed4PicGo gallery — Immich layout + multi-type preview */
+/**
+ * PictureBed4PicGo — GitHub Pages 图床画廊
+ *
+ * 单页应用（无构建工具），主要职责：
+ * 1. 从 GitHub 仓库同步 images/ 与 private/ 文件列表
+ * 2. 网格/列表浏览、灯箱预览、侧栏详情
+ * 3. 重复/相似分组审阅（读 meta/similar-index.json）
+ * 4. 加密标签持久化（meta/asset-tags.enc.json）
+ * 5. Hash 路由：菜单、预览、详情、对比均可分享链接
+ *
+ * 全局状态集中在文件顶部 let/const；UI 通过 innerHTML 渲染。
+ * 写操作需 GitHub PAT（sessionStorage），读公开 images/ 无需登录。
+ */
 (function (global) {
   'use strict';
 
+  /* ——— 认证 / OAuth（sessionStorage，关标签页即失效） ——— */
   const TOKEN_KEY = 'pb4pg_pat';
   const AUTH_USER_KEY = 'pb4pg_user';
   const AUTH_AVATAR_KEY = 'pb4pg_avatar';
@@ -11,8 +24,13 @@
   const OAUTH_STATE_KEY = 'pb4pg_oauth_state';
   const OAUTH_VERIFIER_KEY = 'pb4pg_code_verifier';
   const OAUTH_SECRET_KEY = 'pb4pg_oauth_secret';
+  /** 从 PicGo 风格文件名提取 32 位内容 hash，用于重复检测 */
   const HASH_RE = /([a-f0-9]{32})(?:-\d+)?\.[^.]+$/i;
 
+  /**
+   * 扩展名 → 媒体大类。决定缩略图样式、灯箱渲染分支、侧栏分类计数。
+   * kind === 'other' 时走「不支持内嵌预览」友好提示。
+   */
   const EXT_MAP = {
     image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'heic', 'heif', 'tif', 'tiff', 'jfif', 'pjpeg'],
     video: ['mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v', 'ogv', 'wmv', 'flv', '3gp'],
@@ -27,15 +45,20 @@
 
   let ITEMS = [];
   let OLD_MAP = {};
-  /** Bidirectional rename links for date recovery after manual rename. */
+  /** 重命名双向链：手动改名后仍可从旧路径恢复拍摄日期 */
   const RENAME_LINKS = new Map();
+  /** 当前筛选结果（普通菜单为 filter() 输出；重复/相似为 flattenSets） */
   let filtered = [];
+  /** 当前菜单下勾选的 newRel 集合（切换菜单时会换一套，见 selectionByCat） */
   const selected = new Set();
-  /** Per-menu selection memory: category -> rel[] */
+  /** 按侧栏菜单分别记忆勾选：category -> rel[]，切回菜单时 restore */
   const selectionByCat = new Map();
   let focused = null;
+  /** 侧栏详情面板正在展示的文件 */
   let detailItem = null;
+  /** 灯箱内 filtered/lbNavPool 的当前索引 */
   let lightboxIdx = -1;
+  /** 侧栏当前分类：all | image | vault | dup | similar … */
   let category = 'all';
   let viewMode = 'grid';
   let sortBy = 'date-desc';
@@ -53,25 +76,35 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'selscope';
+  const ASSET_VERSION = 'hashfix';
+  /** 公开图床根路径（PicGo 默认）；Markdown 外链指向此目录 */
   const PUBLIC_PREFIX = 'images/';
+  /** 私有目录；列表需登录，预览走 blob 或可选 Worker 代理 */
   const PRIVATE_PREFIX = 'private/';
+  /** 加密标签密文文件路径（仓库内无明文标签） */
   const TAGS_META_PATH = 'meta/asset-tags.enc.json';
+  /** 标签口令仅存 sessionStorage，关页即失；不写入 GitHub */
   const TAGS_PASS_SESSION_KEY = 'pb4pg_tags_pass';
+  /** PBKDF2 迭代次数，与 meta 文件内 iter 字段一致 */
   const TAGS_PBKDF2_ITER = 600000;
+  /** Hash 路由允许的菜单段 */
   const ROUTE_CATS = new Set(['all', 'image', 'video', 'audio', 'document', 'text', 'other', 'vault', 'dup', 'similar']);
+  /** 为 true 时禁止 syncAppRoute，避免 applyRouteFromHash 与 UI 互相触发死循环 */
   let routeQuiet = false;
+  /** init 完成且 ITEMS 已加载后才写入地址栏 hash */
   let routeReady = false;
   const ACTIONS_SIMILAR_URL =
     'https://github.com/PioneerSunOvO/PictureBed4PicGo/actions/workflows/similar-index.yml';
   /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
   let repoHeadCommit = null;
-  /** rel -> { url, expMs, revoke? } */
+  /** 私有文件 blob URL 缓存，避免重复拉 GitHub API */
   const privateUrlCache = new Map();
-  /** Encrypted tags: entryId -> string[] after unlock */
+  /** 解锁后内存中的标签：entryId(SHA256) -> string[] */
   let tagsById = new Map();
+  /** 从仓库加载的整包密文 JSON 结构 */
   let tagsEnvelope = null;
   let tagsFileSha = null;
+  /** 由口令 + salt 派生的 AES-GCM 密钥，仅内存持有 */
   let tagsCryptoKey = null;
   let tagsSalt = null;
   let tagsUnlocked = false;
@@ -82,6 +115,21 @@
   function isPrivateRel(rel) { return !!rel && rel.startsWith(PRIVATE_PREFIX); }
   function relPrefix(rel) { return isPrivateRel(rel) ? PRIVATE_PREFIX : PUBLIC_PREFIX; }
 
+  /* ========================================================================
+   * Hash 路由（GitHub Pages 静态站，用 location.hash 实现可分享深链）
+   *
+   * 路径形态：
+   *   #/vault                          — 私有菜单
+   *   #/image?q=cat&sort=name-asc      — 搜索/排序/视图
+   *   #/all/preview/images/foo.jpg     — 灯箱预览
+   *   #/all/preview/private/x.jpg?fs=1&info=1 — 全屏 + 详情抽屉
+   *   #/all/detail/images/foo.md       — 侧栏详情
+   *   #/similar/compare?l=...&r=...    — 左右对比
+   *
+   * syncAppRoute('push') 进历史栈；'replace' 仅修正 URL 不增加后退步数。
+   * ======================================================================== */
+
+  /** 将仓库相对路径编码进 hash 段（逐段 encodeURIComponent） */
   function encodeRelPath(rel) {
     return String(rel || '').split('/').map(encodeURIComponent).join('/');
   }
@@ -92,6 +140,7 @@
     }).join('/');
   }
 
+  /** 从 DOM 读取应写入 hash 查询串的 UI 状态 */
   function readRouteQuery() {
     const qEl = document.getElementById('q');
     return {
@@ -102,6 +151,7 @@
     };
   }
 
+  /** 根据当前 category、灯箱/详情状态、筛选条件生成完整 hash */
   function buildAppHash() {
     const rq = readRouteQuery();
     const params = new URLSearchParams();
@@ -134,6 +184,7 @@
     return '#' + path + (qs ? '?' + qs : '');
   }
 
+  /** 解析 location.hash 为结构化路由对象 */
   function parseAppHash() {
     let raw = String(location.hash || '').replace(/^#/, '');
     if (!raw) {
@@ -172,13 +223,25 @@
     };
   }
 
+  /** 将 buildAppHash() 结果写入地址栏；push 用 location.hash 保证地址栏可见更新 */
   function syncAppRoute(mode) {
     if (routeQuiet || !routeReady) return;
     const hash = buildAppHash();
-    if (hash === (location.hash || '')) return;
-    const url = location.pathname + location.search + hash;
-    if (mode === 'push') history.pushState({ gallery: 1 }, '', url);
-    else history.replaceState({ gallery: 1 }, '', url);
+    const body = hash.replace(/^#/, '');
+    const cur = (location.hash || '').replace(/^#/, '');
+    if (body === cur) return;
+    routeQuiet = true;
+    try {
+      const url = location.pathname + location.search + hash;
+      if (mode === 'push') {
+        location.hash = body;
+      } else {
+        history.replaceState({ gallery: 1 }, '', url);
+        if ((location.hash || '').replace(/^#/, '') !== body) location.replace(url);
+      }
+    } finally {
+      routeQuiet = false;
+    }
   }
 
   function setNavActive(cat) {
@@ -195,6 +258,10 @@
     if (l) l.classList.toggle('active', viewMode === 'list');
   }
 
+  /**
+   * 从 URL 恢复 UI（前进/后退、粘贴链接打开、init 收尾）。
+   * 切换 category 时同步做勾选快照/恢复，与 switchCategory 行为一致。
+   */
   async function applyRouteFromHash() {
     const parsed = parseAppHash();
     routeQuiet = true;
@@ -232,22 +299,22 @@
         const left = itemByRel(parsed.left);
         const right = itemByRel(parsed.right);
         if (left && right) openCompare(left, right, [left, right]);
-        else if (lbOpen) closeLightbox();
+        else if (lbOpen) closeLightbox({ sync: false });
       } else if (wantPreview) {
         const item = itemByRel(parsed.rel);
         if (item) {
           openLightbox(item, parsed.fs);
           if (parsed.info) await openLbInfo(item);
-          else if (lbInfoOpen) closeLbInfo();
-        } else if (lbOpen) closeLightbox();
+          else closeLbInfo({ sync: false });
+        } else if (lbOpen) closeLightbox({ sync: false });
       } else if (wantDetail) {
-        if (lbOpen) closeLightbox();
+        if (lbOpen) closeLightbox({ sync: false });
         const item = itemByRel(parsed.rel);
         if (item) await openDetail(item);
-        else closeDetail();
+        else closeDetail({ sync: false });
       } else {
-        if (lbOpen) closeLightbox();
-        if (detailItem) closeDetail();
+        if (lbOpen) closeLightbox({ sync: false });
+        if (detailItem) closeDetail({ sync: false });
       }
     } finally {
       routeQuiet = false;
@@ -255,11 +322,15 @@
     syncAppRoute('replace');
   }
 
+  /* ——— 按菜单隔离勾选：私有里选的图切到「图片」会清空，回到「私有」再恢复 ——— */
+
+  /** 离开菜单前把当前 selected 存入 selectionByCat */
   function snapshotSelectionForCategory(cat) {
     if (!cat) return;
     selectionByCat.set(cat, [...selected]);
   }
 
+  /** 进入菜单时从 selectionByCat 恢复；已删除的 rel 自动忽略 */
   function restoreSelectionForCategory(cat) {
     selected.clear();
     const saved = selectionByCat.get(cat);
@@ -270,11 +341,13 @@
     });
   }
 
+  /** 登出或全量同步后清空所有菜单的勾选记忆 */
   function clearAllSelections() {
     selected.clear();
     selectionByCat.clear();
   }
 
+  /** 删除文件时从 selected 与各菜单快照中移除该 rel */
   function pruneSelectionMemory(rel) {
     if (!rel) return;
     selected.delete(rel);
@@ -285,6 +358,7 @@
     });
   }
 
+  /** 重命名后把各菜单快照里的 oldRel 替换为 newRel */
   function migrateSelectionRel(oldRel, newRel) {
     if (!oldRel || !newRel || oldRel === newRel) return;
     if (selected.has(oldRel)) {
@@ -296,6 +370,7 @@
     });
   }
 
+  /** 侧栏菜单切换：快照旧菜单勾选 → 恢复新菜单勾选 → 关闭灯箱/详情 → 刷新列表 */
   function switchCategory(next, routeMode) {
     if (!next || !ROUTE_CATS.has(next)) return;
     if (next === category) {
@@ -310,8 +385,8 @@
     routeQuiet = true;
     try {
       const lb = document.getElementById('lightbox');
-      if (lb && lb.classList.contains('open')) closeLightbox();
-      if (detailItem) closeDetail();
+      if (lb && lb.classList.contains('open')) closeLightbox({ sync: false });
+      if (detailItem) closeDetail({ sync: false });
     } finally {
       routeQuiet = false;
     }
@@ -365,15 +440,21 @@
     if (stats) stats.textContent = '';
   }
 
-  /** Lightbox / compare state */
-  let lbMode = 'single'; // single | compare
+  /* ——— 灯箱 / 对比模式状态 ——— */
+  let lbMode = 'single'; // 'single' 单图预览 | 'compare' 左右对比
   let lbFullscreen = false;
+  /** 灯箱内右侧深色详情抽屉是否展开 */
   let lbInfoOpen = false;
   let lbCompareLeft = null;
   let lbCompareRight = null;
+  /** 对比模式下除左侧保留项外的候选项列表 */
   let lbComparePool = [];
-  /** When set, ←/→ navigate within this list (e.g. one similar/dup group). */
+  /**
+   * 灯箱 ←/→ 导航范围。非 null 时只在组内切换（如相似/重复同组），
+   * 否则在 filtered 全列表循环。
+   */
   let lbNavPool = null;
+  /** 图片缩放控制器实例，关闭灯箱时 destroyLbZoom 统一销毁 */
   let lbZoomControllers = [];
 
   function extOf(name) {
@@ -381,6 +462,7 @@
     return i >= 0 ? name.slice(i + 1).toLowerCase() : '';
   }
 
+  /** 根据扩展名返回 image | video | audio | document | pdf | text | other */
   function fileKind(name) {
     const ext = extOf(name);
     for (const [kind, exts] of Object.entries(EXT_MAP)) {
@@ -389,6 +471,7 @@
     return 'other';
   }
 
+  /** 是否允许进入灯箱：当前所有类型均可打开，不支持的走友好降级 UI */
   function canLightboxPreview(item) {
     return !!item;
   }
@@ -399,6 +482,9 @@
       (item.kind === 'document' && item.ext === 'pdf');
   }
 
+  /**
+   * 文本预览拉取 URL：私有 blob 优先；否则用 shareUrlOf（CDN/Raw）以便 fetch 读内容
+   */
   function textFetchUrl(item, previewUrl) {
     if (previewUrl && previewUrl.startsWith('blob:')) return previewUrl;
     const share = shareUrlOf(item);
@@ -460,7 +546,19 @@
     return out.join('');
   }
 
-  /* ——— Encrypted asset tags (AES-256-GCM + PBKDF2, Web Crypto) ——— */
+  /* ========================================================================
+   * 加密标签子系统（Web Crypto API，零后端）
+   *
+   * 仓库文件 meta/asset-tags.enc.json 结构：
+   *   { v, alg, kdf, iter, salt, entries: { [entryId]: { iv, data } } }
+   *
+   * entryId = SHA256('pb4pg-tag:' + newRel)，不暴露原始路径明文。
+   * 每条 entry 的 data 为 AES-256-GCM 密文（含认证标签），明文 JSON: { t: ['标签1',…] }。
+   *
+   * 口令 → PBKDF2-SHA256(salt, 600000 次) → AES 密钥。
+   * 口令仅存 sessionStorage（pb4pg_tags_pass），换浏览器需重新输入同一口令。
+   * 写操作需 GitHub PAT，通过 putFileViaGit 提交密文。
+   * ======================================================================== */
 
   function b64FromBytes(bytes) {
     let binary = '';
@@ -483,10 +581,12 @@
     return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
+  /** 文件在密文包中的稳定键：SHA256('pb4pg-tag:' + rel) */
   async function tagEntryIdForRel(rel) {
     return sha256Hex('pb4pg-tag:' + String(rel || ''));
   }
 
+  /** 从用户口令派生 AES-256-GCM 密钥（PBKDF2） */
   async function deriveTagsKey(passphrase, saltBytes, iterations) {
     const baseKey = await crypto.subtle.importKey(
       'raw',
@@ -586,21 +686,12 @@
   }
 
   function updateTagsUnlockUI() {
-    const btn = document.getElementById('tagsUnlockBtn');
-    const lockHint = document.getElementById('tagsLockHint');
-    const entryCount = tagsEnvelope && tagsEnvelope.entries
-      ? Object.keys(tagsEnvelope.entries).length : 0;
-    if (btn) {
-      btn.textContent = tagsUnlocked ? '锁定标签' : (entryCount ? '解锁标签' : '设置标签口令');
-      btn.classList.toggle('primary', !tagsUnlocked);
-    }
-    if (lockHint) {
-      if (tagsUnlocked) lockHint.textContent = '已解锁 · 点卡片「标签」添加';
-      else if (entryCount) lockHint.textContent = '标签已加密 · ' + entryCount + ' 条密文';
-      else lockHint.textContent = '点「设置口令」后，在详情里打标签';
-    }
+    /* 标签入口在卡片右上角，不再使用顶部工具栏 */
   }
 
+  let tagPopoverItem = null;
+
+  /** 从 GitHub 拉取 meta/asset-tags.enc.json；若 session 有口令则尝试自动解锁 */
   async function loadTagsEnvelope() {
     tagsEnvelope = null;
     tagsFileSha = null;
@@ -629,6 +720,10 @@
     }
   }
 
+  /**
+   * 用口令解密全部 entries 到内存 tagsById。
+   * 首次使用（entries 为空）会生成新 salt 并初始化 envelope 骨架。
+   */
   async function unlockTags(passphrase, silent) {
     const pass = String(passphrase || '').trim();
     if (pass.length < 6) throw new Error('标签口令至少 6 位');
@@ -691,6 +786,7 @@
     setStatus('标签已锁定', 'ok');
   }
 
+  /** 将 tagsById 全量重新加密后写入仓库（Git Data API） */
   async function persistTagsEnvelope() {
     if (!token()) throw new Error('请先登录 GitHub');
     if (!tagsUnlocked || !tagsCryptoKey || !tagsSalt) throw new Error('请先解锁标签');
@@ -719,6 +815,7 @@
     updateTagsUnlockUI();
   }
 
+  /** 更新某文件的标签列表并持久化；tagsArr 为空则删除该 entry */
   async function setItemTags(item, tagsArr) {
     if (!item) return;
     if (!tagsUnlocked || !tagsCryptoKey) throw new Error('请先解锁标签口令');
@@ -737,8 +834,10 @@
     void filter();
     if (detailItem && detailItem.newRel === item.newRel) void openDetail(item);
     if (lbInfoOpen) void syncLbInfoIfOpen();
+    if (tagPopoverItem && tagPopoverItem.newRel === item.newRel) void refreshTagPopover();
   }
 
+  /** 重命名文件时迁移密文 entry 键（oldId → newId） */
   async function migrateItemTags(oldRel, newRel) {
     if (!tagsUnlocked || !oldRel || !newRel || oldRel === newRel) return;
     const oldId = await tagEntryIdForRel(oldRel);
@@ -759,6 +858,7 @@
     ).join('') + (tags.length > 4 ? '<span class="tag-chip tag-more">+' + (tags.length - 4) + '</span>' : '');
   }
 
+  /** 详情/灯箱底部标签编辑区 HTML；未解锁时显示「解锁口令」按钮 */
   function buildTagEditorHtml(item, tags) {
     if (!token()) {
       return '<div class="tag-editor muted">登录后可管理加密标签</div>';
@@ -805,6 +905,10 @@
     if (unlockBtn) {
       e.preventDefault();
       await promptUnlockTags();
+      if (tagsUnlocked) {
+        void filter();
+        if (tagPopoverItem) await refreshTagPopover();
+      }
       return;
     }
     const removeBtn = e.target.closest('[data-tag-remove]');
@@ -816,14 +920,16 @@
       return;
     }
     const addBtn = e.target.closest('[data-tag-action="add"]');
-    const input = (e.target.closest('.tag-editor') || document).querySelector('#tagInput');
-    if (addBtn || (e.type === 'keydown' && e.key === 'Enter' && e.target && e.target.id === 'tagInput')) {
+    const root = e.target.closest('.tag-editor');
+    const input = root ? root.querySelector('input[type="text"]') : null;
+    if (addBtn || (e.type === 'keydown' && e.key === 'Enter' && e.target && e.target.matches('.tag-editor input[type="text"]'))) {
       e.preventDefault();
       const val = input ? input.value : '';
       if (!String(val).trim()) return;
       const cur = await tagsForItem(item);
       await setItemTags(item, cur.concat([val]));
       if (input) input.value = '';
+      return;
     }
   }
 
@@ -1824,10 +1930,34 @@
     return '<span class="private-badge" title="私有：可复制私链到其他设备，不建议写进公开 Markdown">私有</span>';
   }
 
+  function cardUserTagsTriggerHtml(item) {
+    if (!token()) return '';
+    const id = item._tagId || tagIdCache.get(item.newRel);
+    const tags = (tagsUnlocked && id) ? (tagsById.get(id) || []) : [];
+    const hasEncrypted = !!(id && tagsEnvelope && tagsEnvelope.entries && tagsEnvelope.entries[id]);
+    let inner = '';
+    if (tagsUnlocked) {
+      if (tags.length) {
+        inner = tags.slice(0, 4).map(t =>
+          '<span class="tag-chip">' + escapeHtml(t) + '</span>'
+        ).join('');
+        if (tags.length > 4) inner += '<span class="tag-chip tag-more">+' + (tags.length - 4) + '</span>';
+      } else {
+        inner = '<span class="tag-chip tag-add-hint">+标签</span>';
+      }
+    } else if (hasEncrypted) {
+      inner = '<span class="tag-chip tag-locked" title="点击输入口令解锁">🔒</span>';
+    } else {
+      inner = '<span class="tag-chip tag-add-hint">+标签</span>';
+    }
+    return '<button type="button" class="card-user-tags" data-action="tag-edit" title="编辑标签（不含「私有」）">' +
+      inner + '</button>';
+  }
+
   function cardBadgesHtml(item) {
     let html = '<div class="card-badges">';
     if (item.isPrivate) html += privateBadgeHtml();
-    html += tagsBadgeHtmlSync(item);
+    html += cardUserTagsTriggerHtml(item);
     html += '</div>';
     return html;
   }
@@ -1837,33 +1967,55 @@
       '<button type="button" data-action="copy-url">' + (item.isPrivate ? '私链' : '链接') + '</button>' +
       '<button type="button" data-action="preview">预览</button>' +
       '<button type="button" data-action="detail">详情</button>' +
-      '<button type="button" data-action="tag">标签</button>' +
       (hasToken ? '<button type="button" class="del" data-action="delete">删除</button>' : '') +
       '</div>';
   }
 
-  async function openDetailForTags(item) {
+  function closeTagPopover() {
+    tagPopoverItem = null;
+    const pop = document.getElementById('tagPopover');
+    if (pop) pop.hidden = true;
+  }
+
+  async function refreshTagPopover() {
+    if (!tagPopoverItem) return;
+    const body = document.getElementById('tagPopoverBody');
+    const title = document.getElementById('tagPopoverTitle');
+    if (!body) return;
+    const tags = await tagsForItem(tagPopoverItem);
+    if (title) title.textContent = tagPopoverItem.name;
+    body.innerHTML = buildTagEditorHtml(tagPopoverItem, tags);
+  }
+
+  async function openTagEditorForItem(item, anchorEl) {
     if (!item) return;
     if (!token()) {
       setStatus('请先登录后再打标签', 'err');
       return;
     }
     if (!tagsUnlocked) {
-      setStatus('请先点顶部「解锁标签 / 设置标签口令」', 'err');
       await promptUnlockTags();
       if (!tagsUnlocked) return;
+      void filter();
     }
-    await openDetail(item);
-    requestAnimationFrame(() => {
-      const ed = document.querySelector('#detailBody .tag-editor');
-      if (ed) ed.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      const input = document.getElementById('tagInput');
-      if (input) {
-        input.focus();
-        input.select();
-      }
-    });
-    setStatus('在右侧详情底部输入标签后回车即可保存', 'ok');
+    tagPopoverItem = item;
+    const pop = document.getElementById('tagPopover');
+    const body = document.getElementById('tagPopoverBody');
+    if (!pop || !body) return;
+    await refreshTagPopover();
+    pop.hidden = false;
+    const rect = anchorEl.getBoundingClientRect();
+    const pad = 8;
+    let top = rect.bottom + pad;
+    let left = Math.min(rect.left, window.innerWidth - 300);
+    if (top + 220 > window.innerHeight) top = Math.max(pad, rect.top - 220);
+    if (left < pad) left = pad;
+    pop.style.top = top + 'px';
+    pop.style.left = left + 'px';
+    const input = body.querySelector('#tagInput');
+    if (input) {
+      requestAnimationFrame(() => input.focus());
+    }
   }
 
   function escapeHtml(s) {
@@ -1874,6 +2026,7 @@
     return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
   }
 
+  /** 同步勾选计数、全选框、批量按钮状态，并把当前菜单勾选写入 selectionByCat */
   function updateSelUI() {
     selectionByCat.set(category, [...selected]);
     const n = selected.size;
@@ -2149,14 +2302,13 @@
       html += '<div class="list-thumb">' + thumbHtml(item, url, true) + '</div>';
       html += '<div class="list-info"><div class="name">' + escapeHtml(item.name);
       if (item.isPrivate) html += ' ' + privateBadgeHtml();
-      html += tagsBadgeHtmlSync(item);
+      if (token()) html += ' ' + cardUserTagsTriggerHtml(item);
       html += '</div>';
       html += '<div class="sub">' + escapeHtml(item.kind) + (item.dateStr ? ' · ' + item.dateStr : '') + '</div></div>';
       html += '<div class="list-actions">';
       html += '<button type="button" data-action="copy-url">' + (item.isPrivate ? '私链' : '链接') + '</button>';
       html += '<button type="button" data-action="preview">预览</button>';
       html += '<button type="button" data-action="detail">详情</button>';
-      html += '<button type="button" data-action="tag">标签</button>';
       if (hasToken) html += '<button type="button" data-action="delete">删除</button>';
       html += '</div>';
       if (hasToken) {
@@ -2232,6 +2384,10 @@
     updateSelUI();
   }
 
+  /**
+   * 主列表筛选入口：按 category / 关键词过滤 ITEMS → render()。
+   * dup/similar 走专用 renderDupGroups 分支。
+   */
   async function filter() {
     updateLoginGate();
     if (requireGalleryLogin() && !token()) {
@@ -2449,7 +2605,6 @@
       (item.isPrivate ? '复制私链' : '复制链接') + '</button>' +
       '<button type="button" data-action="copy-name">复制文件名</button>' +
       '<button type="button" data-action="fullscreen">全屏预览</button>' +
-      '<button type="button" data-action="tag">打标签</button>' +
       '<a href="' + escapeAttr(share || url) + '" target="_blank" rel="noopener">新窗口</a>' +
       (hasToken
         ? '<button type="button" data-action="rename">重命名</button>' +
@@ -2479,6 +2634,7 @@
     return pools.find(g => g.items && g.items.some(i => i.newRel === item.newRel)) || null;
   }
 
+  /** 灯箱左右键导航用的列表：优先 lbNavPool（同组），否则 filtered */
   function lightboxNavList() {
     if (lbNavPool && lbNavPool.length) return lbNavPool;
     return filtered;
@@ -2705,6 +2861,10 @@
     return ctrl;
   }
 
+  /**
+   * 非图片类预览渲染（灯箱 .lb-zoom 与侧栏 #detailPreview 共用）。
+   * video/audio/document/text 各走对应 DOM；other 显示友好降级面板。
+   */
   async function fillNonImage(container, item, url) {
     const openUrl = shareUrlOf(item) || url;
     if (item.kind === 'video') {
@@ -2986,6 +3146,10 @@
     void syncLbInfoIfOpen();
   }
 
+  /**
+   * 打开单图灯箱。若来自相似/重复组则设置 lbNavPool 使 ←/→ 只在组内切换。
+   * @param {object} pool 可选，显式指定导航列表（对比模式传入组内 items）
+   */
   function openLightbox(item, fullscreen, pool) {
     closeDetail({ sync: false });
     lbMode = 'single';
@@ -3050,7 +3214,8 @@
     openCompare(a, b, [a, b]);
   }
 
-  function closeLightbox() {
+  /** 关闭灯箱并 syncAppRoute，回到当前菜单列表 hash */
+  function closeLightbox(opts) {
     destroyLbZoom();
     closeLbInfo({ sync: false });
     const lb = document.getElementById('lightbox');
@@ -3076,9 +3241,12 @@
     lbCompareRight = null;
     lbComparePool = [];
     lbNavPool = null;
-    syncAppRoute('push');
+    if (!opts || opts.sync !== false) syncAppRoute((opts && opts.mode) || 'push');
   }
 
+  /**
+   * 灯箱 ←/→：单图模式在 lightboxNavList 内循环；对比模式切换右侧候选图。
+   */
   function lightboxNav(dir) {
     if (lbMode === 'compare') {
       const pool = lbComparePool.filter(i => i.newRel !== lbCompareLeft.newRel);
@@ -3111,8 +3279,6 @@
       openLightbox(item, false);
     } else if (action === 'detail') {
       void openDetail(item);
-    } else if (action === 'tag') {
-      void openDetailForTags(item);
     } else if (action === 'fullscreen') {
       openLightboxFullscreen(item);
     } else if (action === 'delete') {
@@ -3187,6 +3353,7 @@
         await ensureTagIds(ITEMS);
       }
       await filter();
+      if (routeReady) await applyRouteFromHash();
       if (!silent) setStatus('已同步 ' + ITEMS.length + ' 个文件', 'ok');
       else if (prev !== ITEMS.length) setStatus('已自动同步 ' + ITEMS.length + ' 个文件', 'ok');
       else setStatus('');
@@ -3349,6 +3516,7 @@
     updateLoginGate();
   }
 
+  /** 注册 DOM 事件：搜索/排序/菜单/卡片点击/灯箱/标签编辑/popstate 路由等 */
   function bindEvents() {
     let searchRouteTimer = null;
     document.getElementById('q').oninput = () => {
@@ -3463,10 +3631,17 @@
       }
 
       const actionBtn = e.target.closest('[data-action]');
+      const tagEditBtn = e.target.closest('[data-action="tag-edit"]');
       const card = e.target.closest('[data-rel]');
       if (!card) return;
       const rel = card.dataset.rel;
       const item = itemByRel(rel);
+
+      if (tagEditBtn) {
+        e.stopPropagation();
+        if (item) void openTagEditorForItem(item, tagEditBtn);
+        return;
+      }
 
       if (actionBtn) {
         e.stopPropagation();
@@ -3525,12 +3700,31 @@
     }
 
     const tagsUnlockBtn = document.getElementById('tagsUnlockBtn');
-    if (tagsUnlockBtn) {
-      tagsUnlockBtn.onclick = () => {
-        if (tagsUnlocked) lockTags();
-        else void promptUnlockTags();
+    if (tagsUnlockBtn) tagsUnlockBtn.remove();
+
+    const tagPopover = document.getElementById('tagPopover');
+    if (tagPopover) {
+      tagPopover.addEventListener('click', e => {
+        e.stopPropagation();
+        if (!tagPopoverItem) return;
+        void handleTagEditorEvent(e, tagPopoverItem);
+      });
+      tagPopover.addEventListener('keydown', e => {
+        if (!tagPopoverItem) return;
+        void handleTagEditorEvent(e, tagPopoverItem);
+      });
+      const tagPopoverClose = document.getElementById('tagPopoverClose');
+      if (tagPopoverClose) tagPopoverClose.onclick = e => {
+        e.stopPropagation();
+        closeTagPopover();
       };
     }
+    document.addEventListener('click', e => {
+      const pop = document.getElementById('tagPopover');
+      if (!pop || pop.hidden) return;
+      if (e.target.closest('#tagPopover') || e.target.closest('[data-action="tag-edit"]')) return;
+      closeTagPopover();
+    });
 
     document.getElementById('lightbox').onclick = e => {
       // Close on backdrop / toolbar empty area; keep media, actions & info panel interactive.
@@ -3685,6 +3879,10 @@
     if (manifest) await startOAuthRedirect();
   }
 
+  /**
+   * 应用启动：加载初始 ITEMS → 绑定事件 → OAuth 回调 → 同步 GitHub →
+   * routeReady=true 后 applyRouteFromHash() 恢复 URL 深链状态。
+   */
   async function init(opts) {
     ITEMS = (opts.items || []).map(i => {
       if (i.kind !== undefined) return i;
@@ -3715,6 +3913,20 @@
     }
 
     updateLoginGate();
+    const initialRoute = parseAppHash();
+    if (initialRoute.category && ROUTE_CATS.has(initialRoute.category)) {
+      category = initialRoute.category;
+      setNavActive(category);
+      if (initialRoute.sort) {
+        sortBy = initialRoute.sort;
+        const sortEl = document.getElementById('sort');
+        if (sortEl) sortEl.value = sortBy;
+      }
+      if (initialRoute.view) setViewModeUI(initialRoute.view);
+      if (initialRoute.sim) similarMode = initialRoute.sim;
+      const qEl = document.getElementById('q');
+      if (qEl && initialRoute.q) qEl.value = initialRoute.q;
+    }
     await filter();
     if (location.protocol !== 'file:') await refreshFromGitHub(true);
     else setStatus('本地 file 打开：请用 GitHub Pages 以自动同步');
