@@ -51,7 +51,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'security-4';
+  const ASSET_VERSION = 'privlink';
   const PUBLIC_PREFIX = 'images/';
   const PRIVATE_PREFIX = 'private/';
   const ACTIONS_SIMILAR_URL =
@@ -839,8 +839,8 @@
       dateSource: resolved ? resolved.source : '',
       dupCount: 0,
       rev: 0,
-      cdn: isPrivate ? '' : 'https://cdn.jsdelivr.net/gh/' + REPO.owner + '/' + REPO.repo + '@' + pin + '/' + enc,
-      raw: isPrivate ? '' : 'https://raw.githubusercontent.com/' + REPO.owner + '/' + REPO.repo + '/' + pin + '/' + enc
+      cdn: 'https://cdn.jsdelivr.net/gh/' + REPO.owner + '/' + REPO.repo + '@' + pin + '/' + enc,
+      raw: 'https://raw.githubusercontent.com/' + REPO.owner + '/' + REPO.repo + '/' + pin + '/' + enc
     };
   }
 
@@ -1074,37 +1074,61 @@
     await Promise.all(priv.map(i => ensurePrivateUrl(i).catch(() => '')));
   }
 
+  function currentSourceMode() {
+    const el = document.getElementById('source');
+    return (el && el.value) || 'cdn';
+  }
+
+  function sourceModeLabel(mode) {
+    if (mode === 'raw') return 'GitHub Raw';
+    if (mode === 'local') return '本地路径';
+    return 'jsDelivr CDN';
+  }
+
+  /** Preview URL inside Gallery (blob for private when no proxy). */
   function srcOf(item) {
     if (item.isPrivate) {
       const cached = privateUrlCache.get(item.newRel);
       return cached ? cached.url : '';
     }
-    const source = document.getElementById('source');
+    return shareUrlOf(item);
+  }
+
+  /**
+   * Shareable URL for clipboard / other devices.
+   * Follows toolbar「源」菜单：cdn | raw | local.
+   * Private files: CDN/Raw 私链（公开仓路径可直链；勿当公开 Markdown 推荐用法）.
+   */
+  function shareUrlOf(item) {
+    if (!item) return '';
+    const mode = currentSourceMode();
     const enc = encodePath(item.newRel);
     const pin = mediaPin(item);
-    let url;
-    if (source.value === 'raw') {
-      url = 'https://raw.githubusercontent.com/' + REPO.owner + '/' + REPO.repo + '/' + pin + '/' + enc;
-    } else if (source.value === 'local') {
-      url = item.newRel;
-    } else {
-      url = 'https://cdn.jsdelivr.net/gh/' + REPO.owner + '/' + REPO.repo + '@' + pin + '/' + enc;
+    if (mode === 'local' && !item.isPrivate) return item.newRel;
+    if (mode === 'raw' || (mode === 'local' && item.isPrivate)) {
+      return 'https://raw.githubusercontent.com/' + REPO.owner + '/' + REPO.repo + '/' + pin + '/' + enc;
     }
-    const bust = item.rev || (item.blobSha ? item.blobSha.slice(0, 8) : '');
-    if (bust) url += (url.includes('?') ? '&' : '?') + 'v=' + bust;
-    return url;
+    return 'https://cdn.jsdelivr.net/gh/' + REPO.owner + '/' + REPO.repo + '@' + pin + '/' + enc;
+  }
+
+  async function copyItemLink(item) {
+    if (!item) return;
+    const link = shareUrlOf(item);
+    if (!link) {
+      setStatus('无法生成链接', 'err');
+      return;
+    }
+    await navigator.clipboard.writeText(link);
+    const mode = currentSourceMode();
+    if (item.isPrivate) {
+      setStatus('已复制私链（' + sourceModeLabel(mode) + '）· 可多设备打开', 'ok');
+    } else {
+      setStatus('已复制链接（' + sourceModeLabel(mode) + '）', 'ok');
+    }
   }
 
   function privateBadgeHtml() {
-    return '<span class="private-badge" title="私有文件，不可用于 Markdown 外链">私有</span>';
-  }
-
-  function canCopyPublicUrl(item) {
-    if (!item || item.isPrivate) {
-      setStatus('私有文件不可复制公开外链 / Markdown', 'err');
-      return false;
-    }
-    return true;
+    return '<span class="private-badge" title="私有：可复制私链到其他设备，不建议写进公开 Markdown">私有</span>';
   }
 
   function escapeHtml(s) {
@@ -1206,7 +1230,7 @@
     if (item.kind !== 'image') html += '<span class="type-badge">' + escapeHtml(item.ext) + '</span>';
     html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
     html += '<div class="card-hover">';
-    html += '<button type="button" data-action="copy-url">链接</button>';
+    html += '<button type="button" data-action="copy-url">' + (item.isPrivate ? '私链' : '链接') + '</button>';
     html += '<button type="button" data-action="preview">预览</button>';
     if (hasToken) html += '<button type="button" class="del" data-action="delete">删除</button>';
     html += '</div>';
@@ -1366,7 +1390,7 @@
         if (item.kind !== 'image') html += '<span class="type-badge">' + escapeHtml(item.ext) + '</span>';
         html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
         html += '<div class="card-hover">';
-        html += '<button type="button" data-action="copy-url">链接</button>';
+        html += '<button type="button" data-action="copy-url">' + (item.isPrivate ? '私链' : '链接') + '</button>';
         html += '<button type="button" data-action="preview">预览</button>';
         if (hasToken) html += '<button type="button" class="del" data-action="delete">删除</button>';
         html += '</div>';
@@ -1392,7 +1416,7 @@
       html += '</div>';
       html += '<div class="sub">' + escapeHtml(item.kind) + (item.dateStr ? ' · ' + item.dateStr : '') + '</div></div>';
       html += '<div class="list-actions">';
-      html += '<button type="button" data-action="copy-url">链接</button>';
+      html += '<button type="button" data-action="copy-url">' + (item.isPrivate ? '私链' : '链接') + '</button>';
       html += '<button type="button" data-action="preview">预览</button>';
       if (hasToken) html += '<button type="button" data-action="delete">删除</button>';
       html += '</div>';
@@ -1541,7 +1565,7 @@
         '可见性',
         item.isPrivate ? '私有' : '公开',
         item.isPrivate
-          ? '仅登录 Gallery 可预览，不可用于 Markdown 外链'
+          ? '登录 Gallery 可管理；可复制私链到其他设备（勿当公开 Markdown 推荐）'
           : '可通过 CDN / Raw 直链引用，适合写在 Markdown 中'
       ),
       metaRowHtml(
@@ -1564,19 +1588,29 @@
     ];
 
     const access = [];
+    const mode = currentSourceMode();
+    const share = shareUrlOf(item);
+    access.push(metaRowHtml(
+      '当前可复制链接（' + sourceModeLabel(mode) + '）',
+      share,
+      '随工具栏「源」菜单切换：CDN / Raw' + (item.isPrivate ? ' · 私链可多设备打开，不建议写进公开 Markdown' : ' · 适合 Markdown 与跨设备分享')
+    ));
     if (item.isPrivate) {
       const viaProxy = !!securityCfg().privateProxyBase;
       access.push(metaRowHtml(
-        '访问方式',
-        viaProxy ? '私有代理（签名 URL）' : 'GitHub API Blob（登录后）',
-        viaProxy
-          ? '由 Cloudflare Worker 签发短期链接，过期后需重新打开'
-          : '浏览器登录后通过 GitHub API 拉取内容生成临时预览，无稳定公开链接'
+        'Gallery 预览',
+        viaProxy ? '私有代理签名 URL' : '登录后 GitHub API Blob',
+        '图库内缩略图/灯箱用此方式加载；复制给其他设备请用上方私链'
       ));
       access.push(metaRowHtml(
-        '外链状态',
-        '不可复制公开链接',
-        '私有文件故意不提供 CDN / Raw / Markdown 链接'
+        '私链 · CDN',
+        item.cdn,
+        'jsDelivr 加速，公开仓下知道路径即可访问'
+      ));
+      access.push(metaRowHtml(
+        '私链 · Raw',
+        item.raw,
+        'GitHub 原始地址，公开仓下知道路径即可访问'
       ));
     } else {
       access.push(metaRowHtml(
@@ -1588,13 +1622,6 @@
         'Raw 链接（GitHub）',
         item.raw || '—',
         'GitHub 原始文件地址，可作为 CDN 备选'
-      ));
-      access.push(metaRowHtml(
-        '当前预览源',
-        (document.getElementById('source') || {}).value === 'raw' ? 'GitHub Raw'
-          : (document.getElementById('source') || {}).value === 'local' ? '本地 images/'
-            : 'jsDelivr CDN',
-        '由工具栏「源」下拉框控制缩略图与预览加载地址'
       ));
     }
 
@@ -1673,13 +1700,13 @@
     body.innerHTML = buildDetailMetaHtml(item);
 
     const hasToken = !!token();
+    const share = shareUrlOf(item);
     actions.innerHTML =
-      (item.isPrivate
-        ? '<button type="button" class="primary" disabled title="私有文件不可复制公开外链">复制链接</button>'
-        : '<button type="button" class="primary" data-action="copy-url">复制链接</button>') +
+      '<button type="button" class="primary" data-action="copy-url">' +
+      (item.isPrivate ? '复制私链' : '复制链接') + '</button>' +
       '<button type="button" data-action="copy-name">复制文件名</button>' +
       '<button type="button" data-action="fullscreen">全屏预览</button>' +
-      '<a href="' + escapeAttr(url) + '" target="_blank" rel="noopener">新窗口</a>' +
+      '<a href="' + escapeAttr(share || url) + '" target="_blank" rel="noopener">新窗口</a>' +
       (hasToken
         ? '<button type="button" data-action="rename">重命名</button>' +
           '<button type="button" data-action="replace">替换</button>' +
@@ -1958,7 +1985,8 @@
     const active = lbMode === 'compare'
       ? lbCompareLeft
       : (filtered[lightboxIdx] || null);
-    const activeUrl = active ? srcOf(active) : '';
+    const previewUrl = active ? srcOf(active) : '';
+    const shareUrl = active ? shareUrlOf(active) : '';
     const hasToken = !!token();
 
     addBtn('关闭', '', closeLightbox);
@@ -1973,14 +2001,13 @@
     addBtn('复位缩放', '', () => lbZoomControllers.forEach(c => c.reset && c.reset()));
 
     if (active) {
+      addBtn(active.isPrivate ? '复制私链' : '复制链接', 'primary', () => {
+        void copyItemLink(active);
+      });
       if (!active.isPrivate) {
-        addBtn('复制链接', '', () => {
-          navigator.clipboard.writeText(activeUrl);
-          setStatus('已复制链接', 'ok');
-        });
         addBtn('复制 Markdown', '', () => {
-          navigator.clipboard.writeText('![' + active.name + '](' + activeUrl + ')');
-          setStatus('已复制 Markdown', 'ok');
+          navigator.clipboard.writeText('![' + active.name + '](' + shareUrl + ')');
+          setStatus('已复制 Markdown（' + sourceModeLabel(currentSourceMode()) + '）', 'ok');
         });
       }
       addBtn('复制文件名', '', () => {
@@ -1988,8 +2015,9 @@
         setStatus('已复制文件名', 'ok');
       });
       addBtn('新窗口', '', () => {
-        if (!activeUrl) { setStatus('私有资源未就绪', 'err'); return; }
-        window.open(activeUrl, '_blank', 'noopener');
+        const openUrl = shareUrl || previewUrl;
+        if (!openUrl) { setStatus('链接未就绪', 'err'); return; }
+        window.open(openUrl, '_blank', 'noopener');
       });
       addBtn('详情', '', () => {
         closeLightbox();
@@ -2181,12 +2209,9 @@
   function handleAction(action, rel) {
     const item = itemByRel(rel);
     if (!item) return;
-    const url = srcOf(item);
 
     if (action === 'copy-url') {
-      if (!canCopyPublicUrl(item)) return;
-      navigator.clipboard.writeText(url);
-      setStatus('已复制链接', 'ok');
+      void copyItemLink(item);
     } else if (action === 'copy-name') {
       navigator.clipboard.writeText(item.name);
       setStatus('已复制文件名', 'ok');
@@ -2424,6 +2449,8 @@
     document.getElementById('source').onchange = () => {
       void filter();
       if (detailItem) void openDetail(detailItem);
+      const lb = document.getElementById('lightbox');
+      if (lb && lb.classList.contains('open')) renderLbToolbar();
     };
     document.getElementById('sort').onchange = e => { sortBy = e.target.value; void filter(); };
 
@@ -2572,9 +2599,9 @@
     });
 
     document.getElementById('lightbox').onclick = e => {
-      // Close on backdrop / empty zoom padding; keep media & controls interactive.
-      if (e.target.closest('img, video, audio, iframe, .lightbox-text')) return;
-      if (e.target.closest('button, a, input, .lightbox-actions, .lightbox-caption, .lightbox-toolbar, .lb-thumbs, .lb-pane-label')) return;
+      // Close on backdrop / toolbar empty area; keep media & action buttons interactive.
+      if (e.target.closest('.lb-zoom img, .lb-zoom video, img, video, audio, iframe, .lightbox-text')) return;
+      if (e.target.closest('button, a, input, .lightbox-actions, .lb-thumbs, .lb-pane-label')) return;
       closeLightbox();
     };
     document.getElementById('lightboxExit').onclick = e => {

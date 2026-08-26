@@ -1436,10 +1436,10 @@
           <option value="name-desc">名称 Z-A</option>
           <option value="type">类型</option>
         </select>
-        <select id="source">
-          <option value="cdn">jsDelivr CDN</option>
-          <option value="raw">GitHub Raw</option>
-          <option value="local">本地 images/</option>
+        <select id="source" title="复制链接时使用的地址类型">
+          <option value="cdn">链接：CDN</option>
+          <option value="raw">链接：Raw</option>
+          <option value="local">链接：本地</option>
         </select>
         <div class="view-toggle">
           <button type="button" id="viewGrid" class="active" title="网格">▦</button>
@@ -1508,7 +1508,7 @@
       allowedLogins: []
     };
   </script>
-  <script src="gallery-app.js?v=security-4"></script>
+  <script src="gallery-app.js?v=privlink"></script>
   <script>
     GalleryApp.init({ items: [], oldMap: {} });
   </script>
