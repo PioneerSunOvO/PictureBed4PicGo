@@ -51,7 +51,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'security-3';
+  const ASSET_VERSION = 'security-4';
   const PUBLIC_PREFIX = 'images/';
   const PRIVATE_PREFIX = 'private/';
   const ACTIONS_SIMILAR_URL =
@@ -1505,6 +1505,148 @@
     return (n / 1048576).toFixed(2) + ' MB';
   }
 
+  const KIND_LABELS = {
+    image: '图片', video: '视频', audio: '音频',
+    document: '文档', text: '文本', other: '其他'
+  };
+
+  function kindLabel(kind) {
+    return KIND_LABELS[kind] || kind || '未知';
+  }
+
+  function metaRowHtml(label, value, desc) {
+    if (value == null || value === '') return '';
+    return '<div class="meta-row">' +
+      '<div class="meta-label">' + escapeHtml(label) + '</div>' +
+      (desc ? '<div class="meta-desc">' + escapeHtml(desc) + '</div>' : '') +
+      '<div class="meta-value">' + escapeHtml(String(value)) + '</div>' +
+      '</div>';
+  }
+
+  function metaSectionHtml(title, rows) {
+    const body = (rows || []).filter(Boolean).join('');
+    if (!body) return '';
+    return '<div class="detail-section"><h3>' + escapeHtml(title) + '</h3>' + body + '</div>';
+  }
+
+  function buildDetailMetaHtml(item) {
+    const basic = [
+      metaRowHtml('文件名', item.name, '仓库中的显示名称'),
+      metaRowHtml(
+        '类型',
+        kindLabel(item.kind) + (item.ext ? ' · .' + item.ext : ''),
+        '按扩展名识别的媒体类别'
+      ),
+      metaRowHtml(
+        '可见性',
+        item.isPrivate ? '私有' : '公开',
+        item.isPrivate
+          ? '仅登录 Gallery 可预览，不可用于 Markdown 外链'
+          : '可通过 CDN / Raw 直链引用，适合写在 Markdown 中'
+      ),
+      metaRowHtml(
+        '仓库路径',
+        item.newRel,
+        item.isPrivate ? '位于 private/ 私有目录' : '位于 images/ 公开图床目录'
+      ),
+      metaRowHtml(
+        '文件大小',
+        item.size ? formatBytes(item.size) : '—',
+        item.size ? '最近一次同步或替换时记录的体积' : '尚未获取大小（替换或刷新后可能出现）'
+      ),
+      metaRowHtml(
+        '拍摄 / 文件时间',
+        item.dateStr || '未知',
+        item.dateSource
+          ? '来源：' + item.dateSource
+          : '未能从文件名、旧路径或 Git 提交解析出时间'
+      )
+    ];
+
+    const access = [];
+    if (item.isPrivate) {
+      const viaProxy = !!securityCfg().privateProxyBase;
+      access.push(metaRowHtml(
+        '访问方式',
+        viaProxy ? '私有代理（签名 URL）' : 'GitHub API Blob（登录后）',
+        viaProxy
+          ? '由 Cloudflare Worker 签发短期链接，过期后需重新打开'
+          : '浏览器登录后通过 GitHub API 拉取内容生成临时预览，无稳定公开链接'
+      ));
+      access.push(metaRowHtml(
+        '外链状态',
+        '不可复制公开链接',
+        '私有文件故意不提供 CDN / Raw / Markdown 链接'
+      ));
+    } else {
+      access.push(metaRowHtml(
+        'CDN 链接（jsDelivr）',
+        item.cdn || '—',
+        '推荐用于 Markdown 与站点引用，有缓存加速'
+      ));
+      access.push(metaRowHtml(
+        'Raw 链接（GitHub）',
+        item.raw || '—',
+        'GitHub 原始文件地址，可作为 CDN 备选'
+      ));
+      access.push(metaRowHtml(
+        '当前预览源',
+        (document.getElementById('source') || {}).value === 'raw' ? 'GitHub Raw'
+          : (document.getElementById('source') || {}).value === 'local' ? '本地 images/'
+            : 'jsDelivr CDN',
+        '由工具栏「源」下拉框控制缩略图与预览加载地址'
+      ));
+    }
+
+    const tech = [];
+    if (item.oldRel) {
+      tech.push(metaRowHtml(
+        '旧路径',
+        item.oldRel,
+        'rename-mapping 中记录的重命名前路径，用于日期回溯'
+      ));
+    }
+    if (item.hash) {
+      tech.push(metaRowHtml(
+        '内容 Hash',
+        item.hash,
+        '从文件名解析的 32 位十六进制指纹，用于重复检测'
+      ));
+    }
+    if (item.blobSha) {
+      tech.push(metaRowHtml(
+        'Git Blob SHA',
+        item.blobSha,
+        'GitHub 上该文件 blob 的完整 SHA'
+      ));
+    }
+    if (item.commitSha) {
+      tech.push(metaRowHtml(
+        '最近提交',
+        item.commitSha,
+        '替换或写入后记录的 commit SHA'
+      ));
+    }
+    if (item.dupCount > 1) {
+      tech.push(metaRowHtml(
+        '重复情况',
+        '同 Hash 共 ' + item.dupCount + ' 个文件',
+        '可在侧栏「重复」中查看同组并智能选中待删项'
+      ));
+    }
+    if (item.rev) {
+      tech.push(metaRowHtml(
+        '本地修订标记',
+        String(item.rev),
+        '本会话内替换后用于刷新缓存的时间戳'
+      ));
+    }
+
+    return metaSectionHtml('基础信息', basic) +
+      metaSectionHtml('访问与链接', access) +
+      metaSectionHtml('技术标识', tech);
+  }
+
   async function openDetail(item) {
     if (item.isPrivate) await ensurePrivateUrl(item);
     detailItem = item;
@@ -1528,30 +1670,7 @@
       preview.innerHTML = '<span class="thumb-icon" style="font-size:3rem">' + TYPE_ICONS[item.kind] + '</span>';
     }
 
-    const rows = [
-      ['文件名', item.name],
-      ['可见性', item.isPrivate ? '私有（不可用于 Markdown）' : '公开（可用于 Markdown）'],
-      ['类型', item.kind + ' (.' + item.ext + ')'],
-      ['路径', item.newRel]
-    ];
-    if (!item.isPrivate) {
-      rows.push(['CDN', item.cdn], ['Raw', item.raw]);
-    } else {
-      rows.push(['访问', securityCfg().privateProxyBase ? '私有代理（签名 URL）' : 'GitHub API（登录后）']);
-    }
-    if (item.oldRel) rows.push(['旧路径', item.oldRel]);
-    if (item.hash) rows.push(['Hash', item.hash]);
-    if (item.blobSha) rows.push(['Blob', item.blobSha]);
-    if (item.size) rows.push(['大小', formatBytes(item.size)]);
-    if (item.commitSha) rows.push(['Commit', item.commitSha.slice(0, 12) + '…']);
-    if (item.dateStr) rows.push(['时间', item.dateStr + (item.dateSource ? ' (' + item.dateSource + ')' : '')]);
-    if (item.dupCount > 1) rows.push(['重复', '同 hash 共 ' + item.dupCount + ' 个']);
-
-    body.innerHTML = '<div class="detail-section"><h3>元数据</h3>' +
-      rows.map(([l, v]) =>
-        '<div class="meta-row"><div class="meta-label">' + escapeHtml(l) +
-        '</div><div class="meta-value">' + escapeHtml(v) + '</div></div>'
-      ).join('') + '</div>';
+    body.innerHTML = buildDetailMetaHtml(item);
 
     const hasToken = !!token();
     actions.innerHTML =
