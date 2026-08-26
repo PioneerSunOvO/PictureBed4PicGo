@@ -4,10 +4,5 @@
   "kdf": "PBKDF2-SHA256",
   "iter": 600000,
   "salt": "6EmWwv9JVqvXPlyMpGY+QQ==",
-  "entries": {
-    "092add2d03d7b30b56c03b55b5d71d8a799ed9192e886419502dee0ce1a41b79": {
-      "iv": "+/oPOn3sg4z5d51x",
-      "data": "HU98s4PmW8zm4w4iyz2c88cVKfGFxVzhiseMKzxitUM="
-    }
-  }
+  "entries": {}
 }
