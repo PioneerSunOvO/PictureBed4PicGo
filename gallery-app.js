@@ -51,12 +51,15 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'tagsenc';
+  const ASSET_VERSION = 'approute';
   const PUBLIC_PREFIX = 'images/';
   const PRIVATE_PREFIX = 'private/';
   const TAGS_META_PATH = 'meta/asset-tags.enc.json';
   const TAGS_PASS_SESSION_KEY = 'pb4pg_tags_pass';
   const TAGS_PBKDF2_ITER = 600000;
+  const ROUTE_CATS = new Set(['all', 'image', 'video', 'audio', 'document', 'text', 'other', 'vault', 'dup', 'similar']);
+  let routeQuiet = false;
+  let routeReady = false;
   const ACTIONS_SIMILAR_URL =
     'https://github.com/PioneerSunOvO/PictureBed4PicGo/actions/workflows/similar-index.yml';
   /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
@@ -76,6 +79,189 @@
   function requireGalleryLogin() { return securityCfg().requireLogin !== false; }
   function isPrivateRel(rel) { return !!rel && rel.startsWith(PRIVATE_PREFIX); }
   function relPrefix(rel) { return isPrivateRel(rel) ? PRIVATE_PREFIX : PUBLIC_PREFIX; }
+
+  function encodeRelPath(rel) {
+    return String(rel || '').split('/').map(encodeURIComponent).join('/');
+  }
+
+  function decodeRelPath(parts) {
+    return (parts || []).map(p => {
+      try { return decodeURIComponent(p); } catch (_) { return p; }
+    }).join('/');
+  }
+
+  function readRouteQuery() {
+    const qEl = document.getElementById('q');
+    return {
+      q: qEl ? String(qEl.value || '').trim() : '',
+      sort: sortBy || 'date-desc',
+      view: viewMode || 'grid',
+      sim: similarMode || 'all'
+    };
+  }
+
+  function buildAppHash() {
+    const rq = readRouteQuery();
+    const params = new URLSearchParams();
+    if (rq.q) params.set('q', rq.q);
+    if (rq.sort && rq.sort !== 'date-desc') params.set('sort', rq.sort);
+    if (rq.view && rq.view !== 'grid') params.set('view', rq.view);
+    if (category === 'similar' && rq.sim && rq.sim !== 'all') params.set('sim', rq.sim);
+
+    let path = '/' + (ROUTE_CATS.has(category) ? category : 'all');
+    const lb = document.getElementById('lightbox');
+    const lbOpen = !!(lb && lb.classList.contains('open'));
+
+    if (lbOpen && lbMode === 'compare' && lbCompareLeft && lbCompareRight) {
+      path += '/compare';
+      params.set('l', lbCompareLeft.newRel);
+      params.set('r', lbCompareRight.newRel);
+    } else if (lbOpen) {
+      const item = (typeof lightboxNavList === 'function' ? lightboxNavList()[lightboxIdx] : null) ||
+        (typeof currentLightboxItem === 'function' ? currentLightboxItem() : null);
+      if (item && item.newRel) {
+        path += '/preview/' + encodeRelPath(item.newRel);
+        if (lbFullscreen) params.set('fs', '1');
+        if (lbInfoOpen) params.set('info', '1');
+      }
+    } else if (detailItem && detailItem.newRel) {
+      path += '/detail/' + encodeRelPath(detailItem.newRel);
+    }
+
+    const qs = params.toString();
+    return '#' + path + (qs ? '?' + qs : '');
+  }
+
+  function parseAppHash() {
+    let raw = String(location.hash || '').replace(/^#/, '');
+    if (!raw) {
+      return { category: 'all', mode: 'list', rel: '', left: '', right: '', q: '', sort: '', view: '', sim: '', fs: false, info: false };
+    }
+    const qi = raw.indexOf('?');
+    const pathRaw = (qi >= 0 ? raw.slice(0, qi) : raw).replace(/^\/+|\/+$/g, '');
+    const qs = new URLSearchParams(qi >= 0 ? raw.slice(qi + 1) : '');
+    const parts = pathRaw ? pathRaw.split('/').filter(Boolean) : [];
+    let cat = 'all';
+    let i = 0;
+    if (parts[0] && ROUTE_CATS.has(parts[0])) {
+      cat = parts[0];
+      i = 1;
+    }
+    let mode = 'list';
+    let rel = '';
+    if (parts[i] === 'preview' || parts[i] === 'detail') {
+      mode = parts[i];
+      rel = decodeRelPath(parts.slice(i + 1));
+    } else if (parts[i] === 'compare') {
+      mode = 'compare';
+    }
+    return {
+      category: cat,
+      mode,
+      rel,
+      left: qs.get('l') || '',
+      right: qs.get('r') || '',
+      q: qs.get('q') || '',
+      sort: qs.get('sort') || '',
+      view: qs.get('view') || '',
+      sim: qs.get('sim') || '',
+      fs: qs.get('fs') === '1',
+      info: qs.get('info') === '1'
+    };
+  }
+
+  function syncAppRoute(mode) {
+    if (routeQuiet || !routeReady) return;
+    const hash = buildAppHash();
+    if (hash === (location.hash || '')) return;
+    const url = location.pathname + location.search + hash;
+    if (mode === 'push') history.pushState({ gallery: 1 }, '', url);
+    else history.replaceState({ gallery: 1 }, '', url);
+  }
+
+  function setNavActive(cat) {
+    document.querySelectorAll('.nav-item[data-cat]').forEach(b => {
+      b.classList.toggle('active', b.dataset.cat === cat);
+    });
+  }
+
+  function setViewModeUI(mode) {
+    viewMode = mode === 'list' ? 'list' : 'grid';
+    const g = document.getElementById('viewGrid');
+    const l = document.getElementById('viewList');
+    if (g) g.classList.toggle('active', viewMode === 'grid');
+    if (l) l.classList.toggle('active', viewMode === 'list');
+  }
+
+  async function applyRouteFromHash() {
+    const parsed = parseAppHash();
+    routeQuiet = true;
+    try {
+      if (parsed.category && parsed.category !== category) autoSmartSelected = false;
+      if (parsed.category) category = parsed.category;
+      setNavActive(category);
+
+      const qEl = document.getElementById('q');
+      if (qEl) qEl.value = parsed.q || '';
+
+      if (parsed.sort) {
+        sortBy = parsed.sort;
+        const sortEl = document.getElementById('sort');
+        if (sortEl) sortEl.value = sortBy;
+      }
+      if (parsed.view) setViewModeUI(parsed.view);
+      if (parsed.sim) similarMode = parsed.sim;
+
+      await filter();
+
+      const wantPreview = parsed.mode === 'preview' && parsed.rel;
+      const wantDetail = parsed.mode === 'detail' && parsed.rel;
+      const wantCompare = parsed.mode === 'compare' && parsed.left && parsed.right;
+      const lb = document.getElementById('lightbox');
+      const lbOpen = !!(lb && lb.classList.contains('open'));
+
+      if (wantCompare) {
+        const left = itemByRel(parsed.left);
+        const right = itemByRel(parsed.right);
+        if (left && right) openCompare(left, right, [left, right]);
+        else if (lbOpen) closeLightbox();
+      } else if (wantPreview) {
+        const item = itemByRel(parsed.rel);
+        if (item) {
+          openLightbox(item, parsed.fs);
+          if (parsed.info) await openLbInfo(item);
+          else if (lbInfoOpen) closeLbInfo();
+        } else if (lbOpen) closeLightbox();
+      } else if (wantDetail) {
+        if (lbOpen) closeLightbox();
+        const item = itemByRel(parsed.rel);
+        if (item) await openDetail(item);
+        else closeDetail();
+      } else {
+        if (lbOpen) closeLightbox();
+        if (detailItem) closeDetail();
+      }
+    } finally {
+      routeQuiet = false;
+    }
+    syncAppRoute('replace');
+  }
+
+  function switchCategory(next, routeMode) {
+    if (!next || !ROUTE_CATS.has(next)) return;
+    if (next !== category) autoSmartSelected = false;
+    category = next;
+    setNavActive(category);
+    routeQuiet = true;
+    try {
+      const lb = document.getElementById('lightbox');
+      if (lb && lb.classList.contains('open')) closeLightbox();
+      if (detailItem) closeDetail();
+    } finally {
+      routeQuiet = false;
+    }
+    void filter().then(() => syncAppRoute(routeMode || 'push'));
+  }
 
   function clearPrivateUrlCache() {
     privateUrlCache.forEach(entry => {
@@ -2143,6 +2329,8 @@
   }
 
   async function openDetail(item) {
+    const openingNew = !document.getElementById('appShell').classList.contains('detail-open') ||
+      !detailItem || detailItem.newRel !== item.newRel;
     if (item.isPrivate) await ensurePrivateUrl(item);
     detailItem = item;
     document.getElementById('appShell').classList.add('detail-open');
@@ -2177,11 +2365,14 @@
           '<button type="button" data-action="replace">替换</button>' +
           '<button type="button" class="danger" data-action="delete">删除</button>'
         : '');
+    syncAppRoute(openingNew ? 'push' : 'replace');
   }
 
-  function closeDetail() {
+  function closeDetail(opts) {
+    const had = !!detailItem;
     detailItem = null;
     document.getElementById('appShell').classList.remove('detail-open');
+    if (had && (!opts || opts.sync !== false)) syncAppRoute((opts && opts.mode) || 'push');
   }
 
   function findGroupContaining(item) {
@@ -2208,12 +2399,14 @@
     return list[lightboxIdx] || null;
   }
 
-  function closeLbInfo() {
+  function closeLbInfo(opts) {
+    const was = lbInfoOpen;
     lbInfoOpen = false;
     const panel = document.getElementById('lightboxInfo');
     const lb = document.getElementById('lightbox');
     if (panel) panel.hidden = true;
     if (lb) lb.classList.remove('info-open');
+    if (was && (!opts || opts.sync !== false)) syncAppRoute('replace');
   }
 
   async function renderLbInfo(item) {
@@ -2254,6 +2447,7 @@
     if (panel) panel.hidden = false;
     if (lb) lb.classList.add('info-open');
     await renderLbInfo(target);
+    syncAppRoute('replace');
   }
 
   async function toggleLbInfo() {
@@ -2556,9 +2750,10 @@
 
     if (lbMode === 'single' && active && supportsLbFullscreen(active)) {
       addBtn('全屏', 'primary', () => {
-        closeLbInfo();
+        closeLbInfo({ sync: false });
         lbFullscreen = true;
         renderLightboxStage();
+        syncAppRoute('replace');
       });
     }
 
@@ -2701,7 +2896,7 @@
   }
 
   function openLightbox(item, fullscreen, pool) {
-    closeDetail();
+    closeDetail({ sync: false });
     lbMode = 'single';
     lbFullscreen = !!fullscreen;
     lbCompareLeft = null;
@@ -2723,6 +2918,7 @@
     }
     document.getElementById('lightbox').classList.add('open');
     void renderLightboxStage();
+    syncAppRoute('push');
   }
 
   function openLightboxFullscreen(item) {
@@ -2731,7 +2927,7 @@
 
   function openCompare(left, right, pool) {
     if (!left || !right) return;
-    closeDetail();
+    closeDetail({ sync: false });
     lbMode = 'compare';
     lbFullscreen = false;
     lbCompareLeft = left;
@@ -2741,6 +2937,7 @@
     lightboxIdx = lbNavPool.findIndex(i => i.newRel === left.newRel);
     document.getElementById('lightbox').classList.add('open');
     renderLightboxStage();
+    syncAppRoute('push');
   }
 
   function openGroupCompare(group) {
@@ -2764,7 +2961,7 @@
 
   function closeLightbox() {
     destroyLbZoom();
-    closeLbInfo();
+    closeLbInfo({ sync: false });
     const lb = document.getElementById('lightbox');
     lb.classList.remove('open');
     lb.classList.remove('compare-mode');
@@ -2788,6 +2985,7 @@
     lbCompareRight = null;
     lbComparePool = [];
     lbNavPool = null;
+    syncAppRoute('push');
   }
 
   function lightboxNav(dir) {
@@ -2799,12 +2997,14 @@
       if (!next) return;
       lbCompareRight = next;
       void renderLightboxStage();
+      syncAppRoute('replace');
       return;
     }
     const list = lightboxNavList();
     if (!list.length) return;
     lightboxIdx = (lightboxIdx + dir + list.length) % list.length;
     void renderLightboxStage();
+    syncAppRoute('replace');
   }
 
   function handleAction(action, rel) {
@@ -3057,7 +3257,12 @@
   }
 
   function bindEvents() {
-    document.getElementById('q').oninput = () => { void filter(); };
+    let searchRouteTimer = null;
+    document.getElementById('q').oninput = () => {
+      void filter();
+      clearTimeout(searchRouteTimer);
+      searchRouteTimer = setTimeout(() => syncAppRoute('replace'), 250);
+    };
     document.getElementById('source').onchange = () => {
       void filter();
       if (detailItem) void openDetail(detailItem);
@@ -3067,7 +3272,10 @@
         void syncLbInfoIfOpen();
       }
     };
-    document.getElementById('sort').onchange = e => { sortBy = e.target.value; void filter(); };
+    document.getElementById('sort').onchange = e => {
+      sortBy = e.target.value;
+      void filter().then(() => syncAppRoute('replace'));
+    };
 
     if (location.protocol !== 'file:') {
       const localOpt = document.querySelector('#source option[value="local"]');
@@ -3075,28 +3283,26 @@
     }
 
     document.querySelectorAll('.nav-item[data-cat]').forEach(btn => {
-      btn.onclick = () => {
-        const next = btn.dataset.cat;
-        if (next !== category) autoSmartSelected = false;
-        category = next;
-        document.querySelectorAll('.nav-item[data-cat]').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        void filter();
-      };
+      btn.onclick = () => switchCategory(btn.dataset.cat, 'push');
     });
 
     document.getElementById('viewGrid').onclick = () => {
-      viewMode = 'grid';
-      document.getElementById('viewGrid').classList.add('active');
-      document.getElementById('viewList').classList.remove('active');
-      void filter();
+      setViewModeUI('grid');
+      void filter().then(() => syncAppRoute('replace'));
     };
     document.getElementById('viewList').onclick = () => {
-      viewMode = 'list';
-      document.getElementById('viewList').classList.add('active');
-      document.getElementById('viewGrid').classList.remove('active');
-      void filter();
+      setViewModeUI('list');
+      void filter().then(() => syncAppRoute('replace'));
     };
+
+    window.addEventListener('popstate', () => {
+      if (!routeReady) return;
+      void applyRouteFromHash();
+    });
+    window.addEventListener('hashchange', () => {
+      if (!routeReady || routeQuiet) return;
+      void applyRouteFromHash();
+    });
 
     document.getElementById('mediaContainer').addEventListener('click', e => {
       const dupBtn = e.target.closest('[data-dup-action]');
@@ -3344,9 +3550,10 @@
         autoSmartSelected = false;
         if (similarIndexRaw) {
           applySimilarIndex(similarIndexRaw);
-          void filter();
+          void filter().then(() => syncAppRoute('replace'));
         } else {
           loadSimilarIndex(true);
+          syncAppRoute('replace');
         }
       }
     });
@@ -3418,6 +3625,8 @@
     await filter();
     if (location.protocol !== 'file:') await refreshFromGitHub(true);
     else setStatus('本地 file 打开：请用 GitHub Pages 以自动同步');
+    routeReady = true;
+    await applyRouteFromHash();
   }
 
   global.GalleryApp = { init, refreshFromGitHub };
