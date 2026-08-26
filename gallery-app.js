@@ -78,7 +78,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'tagstyle';
+  const ASSET_VERSION = 'utf8fix';
   /** 公开图床根路径（PicGo 默认）；Markdown 外链指向此目录 */
   const PUBLIC_PREFIX = 'images/';
   /** 私有目录；列表需登录，预览走 blob 或可选 Worker 代理 */
@@ -593,6 +593,11 @@
     return out;
   }
 
+  /** GitHub Contents API 的 base64 → UTF-8 文本（勿直接 atob，中文会乱码） */
+  function decodeGithubTextContent(contentB64) {
+    return new TextDecoder().decode(bytesFromB64(contentB64));
+  }
+
   async function sha256Hex(text) {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text || '')));
     return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -784,7 +789,7 @@
     try {
       const meta = await ghFetch('/contents/' + encodePath(TAG_STYLE_META_PATH) + '?ref=' + REPO.branch + '&_=' + Date.now());
       if (!meta || !meta.content) return;
-      const text = atob(meta.content.replace(/\s/g, ''));
+      const text = decodeGithubTextContent(meta.content);
       applyTagStyleObject(JSON.parse(text), false);
       loadTagStyleFromLocal();
     } catch (_) { /* optional file */ }
@@ -1053,7 +1058,7 @@
       const meta = await ghFetch('/contents/' + encodePath(TAGS_META_PATH) + '?ref=' + REPO.branch + '&_=' + Date.now());
       if (meta && meta.content) {
         tagsFileSha = meta.sha;
-        const text = atob(meta.content.replace(/\s/g, ''));
+        const text = decodeGithubTextContent(meta.content);
         tagsEnvelope = JSON.parse(text);
       }
     } catch (_) {
@@ -1277,7 +1282,7 @@
       const meta = await ghFetch('/contents/' + encodePath(ALIASES_META_PATH) + '?ref=' + REPO.branch + '&_=' + Date.now());
       if (meta && meta.content) {
         aliasesFileSha = meta.sha;
-        const text = atob(meta.content.replace(/\s/g, ''));
+        const text = decodeGithubTextContent(meta.content);
         aliasesEnvelope = JSON.parse(text);
       }
     } catch (_) {
@@ -1399,7 +1404,7 @@
     }
     const cur = aliasOfItem(item);
     const val = prompt(
-      '显示别名（仅用于展示，不会修改仓库中的文件名）\n留空并确定可清除别名',
+      '显示别名（仅展示用，不会改仓库文件名/扩展名）\n留空并确定可清除别名',
       cur || ''
     );
     if (val === null) return;
@@ -2075,7 +2080,7 @@
       try {
         const meta = await ghFetch('/contents/meta/similar-index.json?ref=' + REPO.branch);
         if (meta && meta.content) {
-          return JSON.parse(atob(meta.content.replace(/\s/g, '')));
+          return JSON.parse(decodeGithubTextContent(meta.content));
         }
       } catch (_) { /* fallback below */ }
     }
@@ -2283,7 +2288,7 @@
     try {
       const meta = await ghFetch('/contents/rename-mapping.csv?ref=' + REPO.branch);
       if (meta && meta.content) {
-        parseCsv(atob(meta.content.replace(/\s/g, '')));
+        parseCsv(decodeGithubTextContent(meta.content));
         return;
       }
     } catch (_) { /* fallback */ }
@@ -3829,7 +3834,10 @@
     } else if (action === 'rename') {
       const prefix = relPrefix(rel);
       const cur = rel.slice(prefix.length);
-      const newName = prompt('新文件名（' + prefix + ' 下）', cur);
+      const newName = prompt(
+        '新文件名（' + prefix + ' 下）\n会修改仓库中的真实文件名；若省略扩展名将自动保留原扩展名（.' + (extOf(cur) || '?') + '）',
+        cur
+      );
       if (!newName || newName === cur) return;
       setStatus('重命名中…');
       const wasOpen = document.getElementById('lightbox')?.classList.contains('open');
@@ -3916,6 +3924,11 @@
     const prefix = relPrefix(oldRel);
     newName = newName.trim().replace(/^(images|private)\//, '').replace(/\\/g, '/');
     if (!newName || newName.includes('/')) throw new Error('新文件名无效');
+    const oldBase = oldRel.slice(prefix.length);
+    const oldExt = extOf(oldBase);
+    if (oldExt && !extOf(newName)) {
+      newName = newName + '.' + oldExt;
+    }
     const newRel = prefix + newName;
     if (newRel === oldRel) return;
     const meta = await getFileMeta(oldRel);
