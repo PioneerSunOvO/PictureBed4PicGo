@@ -547,6 +547,27 @@
       padding: 8px 10px 10px;
       border-top: 1px solid var(--line);
     }
+    .card-name.has-alias {
+      font-family: var(--sans);
+      font-weight: 600;
+      word-break: break-word;
+    }
+    .card-name-sub {
+      margin-top: 3px;
+      font-family: var(--mono);
+      font-size: 0.58rem;
+      line-height: 1.35;
+      color: var(--muted);
+      word-break: break-all;
+      display: -webkit-box;
+      -webkit-line-clamp: 1;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .card-name-sub--alias {
+      font-family: var(--sans);
+      font-style: italic;
+    }
     .card-name {
       font-family: var(--mono);
       font-size: 0.68rem;
@@ -1995,8 +2016,12 @@
     <div class="main">
       <header class="toolbar">
         <div class="search-wrap">
-          <input type="search" id="q" placeholder="搜索文件名、路径、hash…">
+          <input type="search" id="q" placeholder="搜索文件名、别名、路径、hash…">
         </div>
+        <select id="nameDisplay" title="卡片名称展示方式">
+          <option value="alias">名称：别名</option>
+          <option value="filename">名称：原名</option>
+        </select>
         <select id="sort">
           <option value="date-desc">时间 ↓</option>
           <option value="date-asc">时间 ↑</option>
@@ -2094,7 +2119,7 @@
       allowedLogins: []
     };
   </script>
-  <script src="gallery-app.js?v=tagicon"></script>
+  <script src="gallery-app.js?v=alias"></script>
   <script>
     GalleryApp.init({ items: [], oldMap: {} });
   </script>

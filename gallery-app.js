@@ -6,6 +6,7 @@
  * 2. 网格/列表浏览、灯箱预览、侧栏详情
  * 3. 重复/相似分组审阅（读 meta/similar-index.json）
  * 4. 加密标签持久化（meta/asset-tags.enc.json）
+ * 5. 展示别名（meta/asset-aliases.json，不改仓库文件名）
  * 5. Hash 路由：菜单、预览、详情、对比均可分享链接
  *
  * 全局状态集中在文件顶部 let/const；UI 通过 innerHTML 渲染。
@@ -76,13 +77,17 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'tagicon';
+  const ASSET_VERSION = 'alias';
   /** 公开图床根路径（PicGo 默认）；Markdown 外链指向此目录 */
   const PUBLIC_PREFIX = 'images/';
   /** 私有目录；列表需登录，预览走 blob 或可选 Worker 代理 */
   const PRIVATE_PREFIX = 'private/';
   /** 加密标签密文文件路径（仓库内无明文标签） */
   const TAGS_META_PATH = 'meta/asset-tags.enc.json';
+  /** 展示别名映射（明文 JSON，仅影响 UI 展示） */
+  const ALIASES_META_PATH = 'meta/asset-aliases.json';
+  /** 卡片名称展示：alias | filename */
+  const NAME_DISPLAY_KEY = 'pb4pg_name_display';
   /** 标签口令仅存 sessionStorage，关页即失；不写入 GitHub */
   const TAGS_PASS_SESSION_KEY = 'pb4pg_tags_pass';
   /** PBKDF2 迭代次数，与 meta 文件内 iter 字段一致 */
@@ -111,6 +116,15 @@
   let tagsBusy = false;
   let tagsPersistTimer = null;
   let tagPopoverItem = null;
+  /** entryId(SHA256) -> 展示别名 */
+  let aliasesById = new Map();
+  let aliasesEnvelope = null;
+  let aliasesFileSha = null;
+  let aliasesBusy = false;
+  let aliasesPersistTimer = null;
+  const aliasIdCache = new Map();
+  /** alias（默认）| filename */
+  let nameDisplayMode = 'alias';
 
   function securityCfg() { return global.SECURITY || {}; }
   function requireGalleryLogin() { return securityCfg().requireLogin !== false; }
@@ -1010,6 +1024,221 @@
     tagsById.set(newId, tagsById.get(oldId));
     tagsById.delete(oldId);
     scheduleTagsPersist();
+  }
+
+  /* ========================================================================
+   * 展示别名（明文 meta/asset-aliases.json，不改仓库文件名）
+   * entryId = SHA256('pb4pg-alias:' + newRel)
+   * ======================================================================== */
+
+  async function aliasEntryIdForRel(rel) {
+    return sha256Hex('pb4pg-alias:' + String(rel || ''));
+  }
+
+  function loadNameDisplayMode() {
+    try {
+      const v = localStorage.getItem(NAME_DISPLAY_KEY);
+      if (v === 'filename' || v === 'alias') nameDisplayMode = v;
+    } catch (_) { /* ignore */ }
+  }
+
+  function saveNameDisplayMode() {
+    try { localStorage.setItem(NAME_DISPLAY_KEY, nameDisplayMode); } catch (_) { /* ignore */ }
+  }
+
+  function aliasOfItem(item) {
+    if (!item) return '';
+    const id = item._aliasId || aliasIdCache.get(item.newRel);
+    if (!id) return '';
+    return aliasesById.get(id) || '';
+  }
+
+  function displayNameOf(item) {
+    if (!item) return '';
+    if (nameDisplayMode === 'filename') return item.name;
+    const alias = aliasOfItem(item);
+    return alias || item.name;
+  }
+
+  function itemNameTitle(item) {
+    const alias = aliasOfItem(item);
+    if (alias) return alias + '（原名：' + item.name + '）';
+    return item.name;
+  }
+
+  function cardNameMetaHtml(item) {
+    const primary = displayNameOf(item);
+    const alias = aliasOfItem(item);
+    let html = '<div class="card-name' + (alias && nameDisplayMode === 'alias' ? ' has-alias' : '') +
+      '" title="' + escapeAttr(itemNameTitle(item)) + '">' + escapeHtml(primary) + '</div>';
+    if (alias && nameDisplayMode === 'alias') {
+      html += '<div class="card-name-sub" title="原文件名">' + escapeHtml(item.name) + '</div>';
+    } else if (alias && nameDisplayMode === 'filename') {
+      html += '<div class="card-name-sub card-name-sub--alias" title="展示别名">别名 · ' + escapeHtml(alias) + '</div>';
+    }
+    return html;
+  }
+
+  function listNameRowInnerHtml(item) {
+    let html = escapeHtml(displayNameOf(item));
+    if (item.isPrivate) html += ' ' + privateBadgeHtml();
+    if (token()) html += ' ' + cardUserTagsTriggerHtml(item);
+    return html;
+  }
+
+  async function ensureAliasIds(items) {
+    const list = items || ITEMS;
+    await Promise.all(list.map(async item => {
+      if (!item || !item.newRel) return;
+      if (aliasIdCache.has(item.newRel)) {
+        item._aliasId = aliasIdCache.get(item.newRel);
+        return;
+      }
+      const id = await aliasEntryIdForRel(item.newRel);
+      aliasIdCache.set(item.newRel, id);
+      item._aliasId = id;
+    }));
+  }
+
+  async function loadAliases() {
+    aliasesEnvelope = { v: 1, entries: {} };
+    aliasesFileSha = null;
+    aliasesById = new Map();
+    try {
+      const meta = await ghFetch('/contents/' + encodePath(ALIASES_META_PATH) + '?ref=' + REPO.branch + '&_=' + Date.now());
+      if (meta && meta.content) {
+        aliasesFileSha = meta.sha;
+        const text = atob(meta.content.replace(/\s/g, ''));
+        aliasesEnvelope = JSON.parse(text);
+      }
+    } catch (_) {
+      aliasesEnvelope = { v: 1, entries: {} };
+    }
+    if (!aliasesEnvelope || typeof aliasesEnvelope !== 'object') aliasesEnvelope = { v: 1, entries: {} };
+    if (!aliasesEnvelope.entries) aliasesEnvelope.entries = {};
+    Object.keys(aliasesEnvelope.entries).forEach(id => {
+      const t = String(aliasesEnvelope.entries[id] || '').trim().slice(0, 80);
+      if (t) aliasesById.set(id, t);
+    });
+  }
+
+  async function persistAliases() {
+    if (!token()) throw new Error('请先登录 GitHub');
+    const entries = {};
+    aliasesById.forEach((val, id) => {
+      const t = String(val || '').trim().slice(0, 80);
+      if (t) entries[id] = t;
+    });
+    const envelope = { v: 1, entries };
+    const json = JSON.stringify(envelope, null, 2);
+    const contentBase64 = b64FromBytes(new TextEncoder().encode(json));
+    const result = await putFileViaGit(ALIASES_META_PATH, contentBase64, 'gallery: update asset aliases');
+    aliasesEnvelope = envelope;
+    aliasesFileSha = result && result.content ? result.content.sha : aliasesFileSha;
+    if (result && result.commitSha) bumpRepoHead(result.commitSha);
+  }
+
+  async function flushAliasesPersist() {
+    if (aliasesPersistTimer) {
+      clearTimeout(aliasesPersistTimer);
+      aliasesPersistTimer = null;
+    }
+    if (aliasesBusy) {
+      scheduleAliasesPersist();
+      return;
+    }
+    aliasesBusy = true;
+    try {
+      await persistAliases();
+      setStatus('别名已保存到仓库', 'ok');
+    } catch (e) {
+      setStatus('别名保存失败: ' + e.message, 'err');
+    } finally {
+      aliasesBusy = false;
+    }
+  }
+
+  function scheduleAliasesPersist() {
+    if (aliasesPersistTimer) clearTimeout(aliasesPersistTimer);
+    aliasesPersistTimer = setTimeout(() => {
+      aliasesPersistTimer = null;
+      void flushAliasesPersist();
+    }, 700);
+  }
+
+  function patchItemNameUI(item) {
+    if (!item || !item.newRel) return;
+    document.querySelectorAll('[data-rel]').forEach(el => {
+      if (el.dataset.rel !== item.newRel) return;
+      const meta = el.querySelector('.card-meta');
+      if (meta) {
+        const dateEl = meta.querySelector('.card-date');
+        meta.innerHTML = cardNameMetaHtml(item) + (dateEl ? dateEl.outerHTML : '');
+      }
+      const listName = el.querySelector('.list-info .name');
+      if (listName) listName.innerHTML = listNameRowInnerHtml(item);
+    });
+  }
+
+  async function setItemAlias(item, aliasText) {
+    if (!item) return;
+    if (!token()) throw new Error('请先登录');
+    const id = item._aliasId || await aliasEntryIdForRel(item.newRel);
+    item._aliasId = id;
+    aliasIdCache.set(item.newRel, id);
+    const text = String(aliasText || '').trim().slice(0, 80);
+    if (text) aliasesById.set(id, text);
+    else aliasesById.delete(id);
+    patchItemNameUI(item);
+    if (detailItem && detailItem.newRel === item.newRel) void openDetail(item);
+    if (tagPopoverItem && tagPopoverItem.newRel === item.newRel) {
+      const title = document.getElementById('tagPopoverTitle');
+      if (title) title.textContent = displayNameOf(item);
+    }
+    if (lbInfoOpen) {
+      const cur = currentLightboxItem();
+      if (cur && cur.newRel === item.newRel) void renderLbInfo(item);
+    }
+    setStatus(text ? '别名已更新 · 保存中…' : '别名已清除 · 保存中…', '');
+    scheduleAliasesPersist();
+  }
+
+  async function migrateItemAlias(oldRel, newRel) {
+    if (!oldRel || !newRel || oldRel === newRel) return;
+    const oldId = await aliasEntryIdForRel(oldRel);
+    const newId = await aliasEntryIdForRel(newRel);
+    if (!aliasesById.has(oldId)) return;
+    aliasesById.set(newId, aliasesById.get(oldId));
+    aliasesById.delete(oldId);
+    aliasIdCache.delete(oldRel);
+    scheduleAliasesPersist();
+  }
+
+  function removeItemAliasByRel(rel) {
+    const id = aliasIdCache.get(rel);
+    if (id && aliasesById.has(id)) {
+      aliasesById.delete(id);
+      scheduleAliasesPersist();
+    }
+    aliasIdCache.delete(rel);
+  }
+
+  async function promptSetAlias(item) {
+    if (!token()) {
+      setStatus('请先登录后再设置别名', 'err');
+      return;
+    }
+    const cur = aliasOfItem(item);
+    const val = prompt(
+      '显示别名（仅用于展示，不会修改仓库中的文件名）\n留空并确定可清除别名',
+      cur || ''
+    );
+    if (val === null) return;
+    try {
+      await setItemAlias(item, val);
+    } catch (e) {
+      setStatus(e.message || String(e), 'err');
+    }
   }
 
   function itemTagsChipHtml(tags, lockedHint) {
@@ -2104,8 +2333,8 @@
   function cardHoverHtml(item, hasToken) {
     return '<div class="card-hover">' +
       '<button type="button" data-action="copy-url">' + (item.isPrivate ? '私链' : '链接') + '</button>' +
-      '<button type="button" data-action="preview">预览</button>' +
       '<button type="button" data-action="detail">详情</button>' +
+      (hasToken ? '<button type="button" data-action="alias">别名</button>' : '') +
       (hasToken ? '<button type="button" class="del" data-action="delete">删除</button>' : '') +
       '</div>';
   }
@@ -2122,7 +2351,7 @@
     const title = document.getElementById('tagPopoverTitle');
     if (!body) return;
     const tags = await tagsForItem(tagPopoverItem);
-    if (title) title.textContent = tagPopoverItem.name;
+    if (title) title.textContent = displayNameOf(tagPopoverItem);
     body.innerHTML = buildTagEditorHtml(tagPopoverItem, tags);
   }
 
@@ -2209,9 +2438,9 @@
   function sortList(list) {
     const sorted = [...list];
     sorted.sort((a, b) => {
-      if (sortBy === 'name-asc') return a.name.localeCompare(b.name);
-      if (sortBy === 'name-desc') return b.name.localeCompare(a.name);
-      if (sortBy === 'type') return a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name);
+      if (sortBy === 'name-asc') return displayNameOf(a).localeCompare(displayNameOf(b));
+      if (sortBy === 'name-desc') return displayNameOf(b).localeCompare(displayNameOf(a));
+      if (sortBy === 'type') return a.kind.localeCompare(b.kind) || displayNameOf(a).localeCompare(displayNameOf(b));
       const da = a.date ? a.date.getTime() : 0;
       const db = b.date ? b.date.getTime() : 0;
       return sortBy === 'date-asc' ? da - db : db - da;
@@ -2262,7 +2491,7 @@
       html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
     }
     html += cardHoverHtml(item, hasToken);
-    html += '<div class="card-meta"><div class="card-name">' + escapeHtml(item.name) + '</div>';
+    html += '<div class="card-meta">' + cardNameMetaHtml(item);
     if (item.dateStr) html += '<div class="card-date">' + escapeHtml(item.dateStr) + '</div>';
     html += '</div></article>';
     return html;
@@ -2422,7 +2651,7 @@
           html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
         }
         html += cardHoverHtml(item, hasToken);
-        html += '<div class="card-meta"><div class="card-name">' + escapeHtml(item.name) + '</div>';
+        html += '<div class="card-meta">' + cardNameMetaHtml(item);
         if (item.dateStr) html += '<div class="card-date">' + escapeHtml(item.dateStr) + '</div>';
         html += '</div></article>';
       });
@@ -2439,15 +2668,13 @@
       const sel = selected.has(item.newRel);
       html += '<div class="list-row' + (sel ? ' selected' : '') + '" data-rel="' + escapeAttr(item.newRel) + '">';
       html += '<div class="list-thumb">' + thumbHtml(item, url, true) + '</div>';
-      html += '<div class="list-info"><div class="name">' + escapeHtml(item.name);
-      if (item.isPrivate) html += ' ' + privateBadgeHtml();
-      if (token()) html += ' ' + cardUserTagsTriggerHtml(item);
+      html += '<div class="list-info"><div class="name">' + listNameRowInnerHtml(item);
       html += '</div>';
       html += '<div class="sub">' + escapeHtml(item.kind) + (item.dateStr ? ' · ' + item.dateStr : '') + '</div></div>';
       html += '<div class="list-actions">';
       html += '<button type="button" data-action="copy-url">' + (item.isPrivate ? '私链' : '链接') + '</button>';
-      html += '<button type="button" data-action="preview">预览</button>';
       html += '<button type="button" data-action="detail">详情</button>';
+      if (hasToken) html += '<button type="button" data-action="alias">别名</button>';
       if (hasToken) html += '<button type="button" data-action="delete">删除</button>';
       html += '</div>';
       if (hasToken) {
@@ -2545,14 +2772,16 @@
       list = list.filter(i => !i.isPrivate && i.kind === category);
     }
     if (kw) {
-      list = list.filter(i =>
-        i.name.toLowerCase().includes(kw) ||
-        (i.oldRel && i.oldRel.toLowerCase().includes(kw)) ||
-        (i.hash && i.hash.includes(kw)) ||
-        i.newRel.toLowerCase().includes(kw) ||
-        i.kind.includes(kw) ||
-        i.ext.includes(kw)
-      );
+      list = list.filter(i => {
+        const alias = aliasOfItem(i);
+        return i.name.toLowerCase().includes(kw) ||
+          (alias && alias.toLowerCase().includes(kw)) ||
+          (i.oldRel && i.oldRel.toLowerCase().includes(kw)) ||
+          (i.hash && i.hash.includes(kw)) ||
+          i.newRel.toLowerCase().includes(kw) ||
+          i.kind.includes(kw) ||
+          i.ext.includes(kw);
+      });
     }
     await render(sortList(list));
   }
@@ -2593,8 +2822,10 @@
   }
 
   function buildDetailMetaHtml(item) {
+    const alias = aliasOfItem(item);
     const basic = [
-      metaRowHtml('文件名', item.name, '仓库中的显示名称'),
+      metaRowHtml('展示别名', alias || '—', '仅用于界面展示，不修改仓库中的文件名'),
+      metaRowHtml('文件名', item.name, '仓库中的实际文件名'),
       metaRowHtml(
         '类型',
         kindLabel(item.kind) + (item.ext ? ' · .' + item.ext : ''),
@@ -2746,7 +2977,8 @@
       '<button type="button" data-action="fullscreen">全屏预览</button>' +
       '<a href="' + escapeAttr(share || url) + '" target="_blank" rel="noopener">新窗口</a>' +
       (hasToken
-        ? '<button type="button" data-action="rename">重命名</button>' +
+        ? '<button type="button" data-action="alias">别名</button>' +
+          '<button type="button" data-action="rename">重命名</button>' +
           '<button type="button" data-action="replace">替换</button>' +
           '<button type="button" class="danger" data-action="delete">删除</button>'
         : '');
@@ -2807,7 +3039,7 @@
       return;
     }
     if (item.isPrivate) await ensurePrivateUrl(item);
-    if (title) title.textContent = item.name;
+    if (title) title.textContent = displayNameOf(item);
     const tags = await tagsForItem(item);
     body.innerHTML = buildDetailMetaHtml(item) + buildTagEditorHtml(item, tags);
     const hasToken = !!token();
@@ -2818,7 +3050,8 @@
       '<button type="button" data-lb-info-action="copy-name">复制文件名</button>' +
       '<a href="' + escapeAttr(share) + '" target="_blank" rel="noopener">新窗口</a>' +
       (hasToken
-        ? '<button type="button" data-lb-info-action="rename">重命名</button>' +
+        ? '<button type="button" data-lb-info-action="alias">别名</button>' +
+          '<button type="button" data-lb-info-action="rename">重命名</button>' +
           '<button type="button" data-lb-info-action="replace">替换</button>' +
           '<button type="button" class="danger" data-lb-info-action="delete">删除</button>'
         : '');
@@ -3418,6 +3651,8 @@
       openLightbox(item, false);
     } else if (action === 'detail') {
       void openDetail(item);
+    } else if (action === 'alias') {
+      void promptSetAlias(item);
     } else if (action === 'fullscreen') {
       openLightboxFullscreen(item);
     } else if (action === 'delete') {
@@ -3489,7 +3724,9 @@
       clearAllSelections();
       if (token()) {
         try { await loadTagsEnvelope(); } catch (_) { /* ignore */ }
+        try { await loadAliases(); } catch (_) { /* ignore */ }
         await ensureTagIds(ITEMS);
+        await ensureAliasIds(ITEMS);
       }
       await filter();
       if (routeReady) await applyRouteFromHash();
@@ -3536,9 +3773,12 @@
     rebuildDupIndex();
     try {
       if (tagsUnlocked) await migrateItemTags(oldRel, newRel);
+      await migrateItemAlias(oldRel, newRel);
       tagIdCache.delete(oldRel);
+      aliasIdCache.delete(oldRel);
       await ensureTagIds([ITEMS[idx]].filter(Boolean));
-    } catch (_) { /* tag migrate best-effort */ }
+      await ensureAliasIds([ITEMS[idx]].filter(Boolean));
+    } catch (_) { /* meta migrate best-effort */ }
   }
 
   async function replaceFile(rel, file) {
@@ -3582,6 +3822,7 @@
     if (lastErr) throw lastErr;
     ITEMS = ITEMS.filter(x => x.newRel !== rel);
     pruneSelectionMemory(rel);
+    removeItemAliasByRel(rel);
     if (detailItem && detailItem.newRel === rel) closeDetail();
     rebuildDupIndex();
     void filter();
@@ -3607,6 +3848,7 @@
         await deleteFile(rel, meta.sha);
         ITEMS = ITEMS.filter(x => x.newRel !== rel);
         pruneSelectionMemory(rel);
+        removeItemAliasByRel(rel);
         ok++;
         setStatus('删除中 ' + ok + '/' + rels.length + '…');
       } catch (e) {
@@ -3676,6 +3918,16 @@
       sortBy = e.target.value;
       void filter().then(() => syncAppRoute('replace'));
     };
+
+    const nameDisplayEl = document.getElementById('nameDisplay');
+    if (nameDisplayEl) {
+      nameDisplayEl.value = nameDisplayMode;
+      nameDisplayEl.onchange = e => {
+        nameDisplayMode = e.target.value === 'filename' ? 'filename' : 'alias';
+        saveNameDisplayMode();
+        void filter();
+      };
+    }
 
     if (location.protocol !== 'file:') {
       const localOpt = document.querySelector('#source option[value="local"]');
@@ -4010,6 +4262,7 @@
 
     window.addEventListener('pagehide', () => {
       if (tagsPersistTimer) void flushTagsPersist();
+      if (aliasesPersistTimer) void flushAliasesPersist();
     });
   }
 
@@ -4033,6 +4286,7 @@
       return buildItem(i.name, i.oldRel);
     });
     OLD_MAP = opts.oldMap || {};
+    loadNameDisplayMode();
     rebuildDupIndex();
     updateCategoryCounts();
     bindEvents();
