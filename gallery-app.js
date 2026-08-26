@@ -76,7 +76,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'tagui';
+  const ASSET_VERSION = 'tagicon';
   /** 公开图床根路径（PicGo 默认）；Markdown 外链指向此目录 */
   const PUBLIC_PREFIX = 'images/';
   /** 私有目录；列表需登录，预览走 blob 或可选 Worker 代理 */
@@ -636,6 +636,60 @@
     return out;
   }
 
+  /** GitHub Labels 风格：标签名哈希到固定色板，同一标签始终同色 */
+  const TAG_PALETTE = [
+    { bg: '#ddf4ff', border: 'rgba(84, 174, 255, 0.45)', text: '#0969da', icon: '#0969da' },
+    { bg: '#dafbe1', border: 'rgba(74, 194, 107, 0.45)', text: '#1a7f37', icon: '#1a7f37' },
+    { bg: '#fff8c5', border: 'rgba(212, 167, 44, 0.45)', text: '#9a6700', icon: '#9a6700' },
+    { bg: '#ffebe9', border: 'rgba(255, 129, 130, 0.45)', text: '#cf222e', icon: '#cf222e' },
+    { bg: '#fbefff', border: 'rgba(194, 151, 255, 0.45)', text: '#8250df', icon: '#8250df' },
+    { bg: '#ffeff7', border: 'rgba(255, 128, 200, 0.45)', text: '#bf3989', icon: '#bf3989' },
+    { bg: '#e6fffa', border: 'rgba(84, 211, 199, 0.45)', text: '#096761', icon: '#096761' },
+    { bg: '#fff1e5', border: 'rgba(255, 183, 124, 0.45)', text: '#bc4c00', icon: '#bc4c00' }
+  ];
+
+  function hashTagName(name) {
+    let h = 5381;
+    const s = String(name || '');
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h) ^ s.charCodeAt(i);
+    return Math.abs(h);
+  }
+
+  function tagPaletteOf(name) {
+    return TAG_PALETTE[hashTagName(name) % TAG_PALETTE.length];
+  }
+
+  function tagChipStyle(name) {
+    const p = tagPaletteOf(name);
+    return '--tag-bg:' + p.bg + ';--tag-border:' + p.border + ';--tag-text:' + p.text + ';--tag-icon:' + p.icon;
+  }
+
+  const TAG_ICON_SVG = '<svg class="tag-chip-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h2.879a1.5 1.5 0 0 1 1.06.44l2.122 2.12a1.5 1.5 0 0 0 1.06.44H13.5A1.5 1.5 0 0 1 15 6.5v6.75A1.5 1.5 0 0 1 13.5 14.5h-9A1.5 1.5 0 0 1 3 13V3.5Zm3.25 1.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z" clip-rule="evenodd"/></svg>';
+
+  const TAG_ICON_OUTLINE_SVG = '<svg class="tag-chip-icon tag-chip-icon--outline" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M3.5 1.5A2 2 0 0 0 1.5 3.5v9A2 2 0 0 0 3.5 14.5h6.879a2 2 0 0 0 1.414-.586l4.122-4.121a2 2 0 0 0 .586-1.414V3.5a2 2 0 0 0-2-2h-9Zm2.75 3.5a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z" clip-rule="evenodd"/></svg>';
+
+  function tagChipHtml(name, opts) {
+    opts = opts || {};
+    const extraClass = opts.extraClass || '';
+    const compact = !!opts.compact;
+    const editable = !!opts.editable;
+    let cls = 'tag-chip';
+    if (extraClass) cls += ' ' + extraClass;
+    if (compact) cls += ' tag-chip--compact';
+    let attrs = ' style="' + tagChipStyle(name) + '" title="' + escapeAttr(name) + '"';
+    if (opts.dataTag) attrs += ' data-tag="' + escapeAttr(name) + '"';
+    const removeBtn = editable
+      ? '<button type="button" data-tag-remove="' + escapeAttr(name) + '" aria-label="移除">×</button>'
+      : '';
+    return '<span class="' + cls + '"' + attrs + '>' + TAG_ICON_SVG +
+      '<span class="tag-chip-label">' + escapeHtml(name) + '</span>' + removeBtn + '</span>';
+  }
+
+  function tagAddHintHtml() {
+    return '<span class="tag-chip tag-add-hint" title="添加标签">' + TAG_ICON_OUTLINE_SVG +
+      '<span class="tag-chip-label">标签</span></span>';
+  }
+
   function getSessionTagPass() {
     try { return sessionStorage.getItem(TAGS_PASS_SESSION_KEY) || ''; } catch (_) { return ''; }
   }
@@ -727,19 +781,22 @@
     if (tagsUnlocked && tags.length > 1) {
       let html = '<span class="tag-stack">';
       tags.slice(0, 8).forEach(t => {
-        html += '<span class="tag-chip tag-stack-item">' + escapeHtml(t) + '</span>';
+        html += tagChipHtml(t, { extraClass: 'tag-stack-item', compact: true });
       });
-      if (tags.length > 8) html += '<span class="tag-chip tag-stack-item tag-more">+' + (tags.length - 8) + '</span>';
+      if (tags.length > 8) {
+        html += '<span class="tag-chip tag-stack-item tag-more tag-chip--compact" title="还有 ' +
+          (tags.length - 8) + ' 个标签">+' + (tags.length - 8) + '</span>';
+      }
       html += '</span>';
       return html;
     }
     if (tagsUnlocked && tags.length === 1) {
-      return '<span class="tag-chip">' + escapeHtml(tags[0]) + '</span>';
+      return tagChipHtml(tags[0]);
     }
     if (hasEncrypted && !tagsUnlocked) {
       return '<span class="tag-chip tag-locked" title="点击输入口令解锁">🔒</span>';
     }
-    return '<span class="tag-chip tag-add-hint">+标签</span>';
+    return tagAddHintHtml();
   }
 
   function cardUserTagsTriggerHtml(item) {
@@ -960,9 +1017,9 @@
       return '<span class="tag-chip tag-locked" title="已加密，解锁后可见">🔒</span>';
     }
     if (!tags || !tags.length) return '';
-    return tags.slice(0, 4).map(t =>
-      '<span class="tag-chip" title="' + escapeAttr(t) + '">' + escapeHtml(t) + '</span>'
-    ).join('') + (tags.length > 4 ? '<span class="tag-chip tag-more">+' + (tags.length - 4) + '</span>' : '');
+    return tags.slice(0, 4).map(t => tagChipHtml(t)).join('') +
+      (tags.length > 4 ? '<span class="tag-chip tag-more tag-chip--compact" title="还有 ' +
+        (tags.length - 4) + ' 个标签">+' + (tags.length - 4) + '</span>' : '');
   }
 
   /** 详情/灯箱底部标签编辑区 HTML；未解锁时显示「解锁口令」按钮 */
@@ -977,10 +1034,7 @@
         '<button type="button" class="primary" data-tag-action="unlock">解锁 / 设置口令</button>' +
         '</div>';
     }
-    const chips = (tags || []).map(t =>
-      '<span class="tag-chip editable" data-tag="' + escapeAttr(t) + '">' +
-      escapeHtml(t) + '<button type="button" data-tag-remove="' + escapeAttr(t) + '" aria-label="移除">×</button></span>'
-    ).join('');
+    const chips = (tags || []).map(t => tagChipHtml(t, { editable: true, dataTag: true })).join('');
     return '<div class="tag-editor" data-tag-rel="' + escapeAttr(item.newRel) + '">' +
       '<div class="tag-editor-title">标签（已加密持久化）</div>' +
       '<div class="tag-chip-row" id="tagChipRow">' + (chips || '<span class="tag-empty">暂无标签</span>') + '</div>' +

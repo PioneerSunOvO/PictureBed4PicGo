@@ -1599,12 +1599,11 @@
     }
     .card-user-tags .tag-stack-item {
       position: relative;
-      max-width: 72px;
-      transition: margin-left .18s ease, box-shadow .18s ease;
+      transition: margin-left .18s ease, box-shadow .18s ease, width .18s ease, padding .18s ease;
       box-shadow: 0 1px 3px rgba(15, 23, 42, .14);
     }
     .card-user-tags .tag-stack .tag-stack-item:not(:first-child) {
-      margin-left: -12px;
+      margin-left: -10px;
     }
     .card-user-tags:hover .tag-stack .tag-stack-item:not(:first-child),
     .card-user-tags:focus-visible .tag-stack .tag-stack-item:not(:first-child) {
@@ -1618,11 +1617,6 @@
     .card-user-tags .tag-stack .tag-stack-item:nth-child(6) { z-index: 3; }
     .card-user-tags .tag-stack .tag-stack-item:nth-child(7) { z-index: 2; }
     .card-user-tags .tag-stack .tag-stack-item:nth-child(8) { z-index: 1; }
-    .tag-chip.tag-add-hint {
-      background: rgba(255,255,255,.88);
-      color: var(--accent);
-      border: 1px dashed rgba(79,110,247,.45);
-    }
     .list-info .card-user-tags {
       vertical-align: middle;
       margin-left: 4px;
@@ -1690,27 +1684,87 @@
     .tag-chip {
       display: inline-flex;
       align-items: center;
-      gap: 4px;
-      max-width: 110px;
-      padding: 2px 7px;
+      gap: 3px;
+      max-width: 120px;
+      padding: 2px 8px 2px 5px;
       border-radius: 999px;
       font-size: 0.62rem;
       font-weight: 600;
-      color: #1e3a5f;
-      background: rgba(147, 197, 253, 0.92);
-      border: 1px solid rgba(59, 130, 246, 0.35);
+      line-height: 1.2;
+      color: var(--tag-text, #1e3a5f);
+      background: var(--tag-bg, rgba(147, 197, 253, 0.92));
+      border: 1px solid var(--tag-border, rgba(59, 130, 246, 0.35));
+      overflow: hidden;
+      white-space: nowrap;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+    }
+    .tag-chip-icon {
+      width: 11px;
+      height: 11px;
+      flex-shrink: 0;
+      color: var(--tag-icon, currentColor);
+      opacity: 0.95;
+    }
+    .tag-chip-label {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      min-width: 0;
+    }
+    .tag-chip--compact {
+      width: 20px;
+      height: 20px;
+      max-width: 20px;
+      min-width: 20px;
+      padding: 0;
+      justify-content: center;
+      gap: 0;
+    }
+    .tag-chip--compact .tag-chip-label {
+      display: none;
+      width: 0;
+      overflow: hidden;
+    }
+    .tag-chip--compact .tag-chip-icon {
+      width: 10px;
+      height: 10px;
+    }
+    .card-user-tags:hover .tag-stack .tag-chip--compact,
+    .card-user-tags:focus-visible .tag-stack .tag-chip--compact {
+      width: auto;
+      height: auto;
+      min-width: 0;
+      max-width: 96px;
+      padding: 2px 8px 2px 5px;
+      gap: 3px;
+    }
+    .card-user-tags:hover .tag-stack .tag-chip--compact .tag-chip-label,
+    .card-user-tags:focus-visible .tag-stack .tag-chip--compact .tag-chip-label {
+      display: inline;
+      width: auto;
     }
     .tag-chip.tag-locked {
       background: rgba(15, 23, 42, 0.7);
       color: #e2e8f0;
       border-color: transparent;
+      box-shadow: none;
     }
     .tag-chip.tag-more {
       background: rgba(148, 163, 184, 0.35);
       color: #334155;
+      border-color: rgba(100, 116, 139, 0.35);
+      justify-content: center;
+      font-size: 0.58rem;
+    }
+    .tag-chip.tag-add-hint {
+      background: rgba(255,255,255,.92);
+      color: var(--accent);
+      border: 1px dashed rgba(79,110,247,.45);
+      box-shadow: none;
+    }
+    .tag-chip.tag-add-hint .tag-chip-icon {
+      color: var(--accent);
+      opacity: 0.85;
     }
     .tag-chip.editable {
       pointer-events: auto;
@@ -2040,7 +2094,7 @@
       allowedLogins: []
     };
   </script>
-  <script src="gallery-app.js?v=tagui"></script>
+  <script src="gallery-app.js?v=tagicon"></script>
   <script>
     GalleryApp.init({ items: [], oldMap: {} });
   </script>
