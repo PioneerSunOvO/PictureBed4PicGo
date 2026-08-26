@@ -51,7 +51,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'approute';
+  const ASSET_VERSION = 'tagux';
   const PUBLIC_PREFIX = 'images/';
   const PRIVATE_PREFIX = 'private/';
   const TAGS_META_PATH = 'meta/asset-tags.enc.json';
@@ -540,9 +540,9 @@
       btn.classList.toggle('primary', !tagsUnlocked);
     }
     if (lockHint) {
-      if (tagsUnlocked) lockHint.textContent = '标签已解锁 · ' + tagsById.size + ' 个文件';
-      else if (entryCount) lockHint.textContent = '标签已加密存储 · ' + entryCount + ' 条密文';
-      else lockHint.textContent = '标签密文未创建 · 添加首个标签时写入仓库';
+      if (tagsUnlocked) lockHint.textContent = '已解锁 · 点卡片「标签」添加';
+      else if (entryCount) lockHint.textContent = '标签已加密 · ' + entryCount + ' 条密文';
+      else lockHint.textContent = '点「设置口令」后，在详情里打标签';
     }
   }
 
@@ -1782,8 +1782,33 @@
       '<button type="button" data-action="copy-url">' + (item.isPrivate ? '私链' : '链接') + '</button>' +
       '<button type="button" data-action="preview">预览</button>' +
       '<button type="button" data-action="detail">详情</button>' +
+      '<button type="button" data-action="tag">标签</button>' +
       (hasToken ? '<button type="button" class="del" data-action="delete">删除</button>' : '') +
       '</div>';
+  }
+
+  async function openDetailForTags(item) {
+    if (!item) return;
+    if (!token()) {
+      setStatus('请先登录后再打标签', 'err');
+      return;
+    }
+    if (!tagsUnlocked) {
+      setStatus('请先点顶部「解锁标签 / 设置标签口令」', 'err');
+      await promptUnlockTags();
+      if (!tagsUnlocked) return;
+    }
+    await openDetail(item);
+    requestAnimationFrame(() => {
+      const ed = document.querySelector('#detailBody .tag-editor');
+      if (ed) ed.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      const input = document.getElementById('tagInput');
+      if (input) {
+        input.focus();
+        input.select();
+      }
+    });
+    setStatus('在右侧详情底部输入标签后回车即可保存', 'ok');
   }
 
   function escapeHtml(s) {
@@ -1882,8 +1907,12 @@
     if (group.type === 'similar' && !isKeep && item.phashDistToKeep != null && item.simToKeep == null) {
       html += '<span class="match-path" title="pHash 汉明距离">pHash ' + item.phashDistToKeep + '</span>';
     }
-    if (item.kind !== 'image') html += '<span class="type-badge">' + escapeHtml(item.ext || 'file') + '</span>';
-    html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
+    if (item.kind !== 'image') {
+      html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) +
+        '<span class="type-badge">' + escapeHtml(item.ext || 'file') + '</span></div>';
+    } else {
+      html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
+    }
     html += cardHoverHtml(item, hasToken);
     html += '<div class="card-meta"><div class="card-name">' + escapeHtml(item.name) + '</div>';
     if (item.dateStr) html += '<div class="card-date">' + escapeHtml(item.dateStr) + '</div>';
@@ -2038,8 +2067,12 @@
         }
         if (isDup) html += '<span class="badge">重复 ×' + item.dupCount + '</span>';
         html += cardBadgesHtml(item);
-        if (item.kind !== 'image') html += '<span class="type-badge">' + escapeHtml(item.ext || 'file') + '</span>';
-        html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
+        if (item.kind !== 'image') {
+          html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) +
+            '<span class="type-badge">' + escapeHtml(item.ext || 'file') + '</span></div>';
+        } else {
+          html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
+        }
         html += cardHoverHtml(item, hasToken);
         html += '<div class="card-meta"><div class="card-name">' + escapeHtml(item.name) + '</div>';
         if (item.dateStr) html += '<div class="card-date">' + escapeHtml(item.dateStr) + '</div>';
@@ -2067,6 +2100,7 @@
       html += '<button type="button" data-action="copy-url">' + (item.isPrivate ? '私链' : '链接') + '</button>';
       html += '<button type="button" data-action="preview">预览</button>';
       html += '<button type="button" data-action="detail">详情</button>';
+      html += '<button type="button" data-action="tag">标签</button>';
       if (hasToken) html += '<button type="button" data-action="delete">删除</button>';
       html += '</div>';
       if (hasToken) {
@@ -2359,6 +2393,7 @@
       (item.isPrivate ? '复制私链' : '复制链接') + '</button>' +
       '<button type="button" data-action="copy-name">复制文件名</button>' +
       '<button type="button" data-action="fullscreen">全屏预览</button>' +
+      '<button type="button" data-action="tag">打标签</button>' +
       '<a href="' + escapeAttr(share || url) + '" target="_blank" rel="noopener">新窗口</a>' +
       (hasToken
         ? '<button type="button" data-action="rename">重命名</button>' +
@@ -2670,16 +2705,16 @@
     }
     const div = document.createElement('div');
     div.className = 'lightbox-text media-fallback-wrap';
-    const extLabel = item.ext ? ('.' + item.ext) : (item.name || '未知');
-    const kindLabel = item.kind === 'other' ? '未知 / 其他格式' : (item.kind || '文件');
+    const extLabel = item.ext ? ('.' + item.ext) : '无扩展名';
+    const kindLabel = item.kind === 'other' ? '暂不支持在线预览' : (item.kind || '文件');
     div.innerHTML =
       '<div class="media-fallback-icon">' + (TYPE_ICONS[item.kind] || TYPE_ICONS.other) + '</div>' +
       '<div class="media-fallback-title">' + escapeHtml(item.name) + '</div>' +
-      '<div class="media-fallback-sub">' + escapeHtml(kindLabel) + ' · ' + escapeHtml(extLabel) +
-      ' · 浏览器无法内嵌预览</div>' +
+      '<div class="media-fallback-sub">当前格式（' + escapeHtml(extLabel) + '）无法在浏览器内直接预览。<br>' +
+      escapeHtml(kindLabel) + ' · 可下载后用本地软件打开，或点下方在新窗口尝试打开。</div>' +
       '<div class="media-fallback-actions">' +
       '<a class="primary" href="' + escapeAttr(openUrl) + '" target="_blank" rel="noopener">新窗口打开</a>' +
-      '<a href="' + escapeAttr(openUrl) + '" download="' + escapeAttr(item.name) + '">下载</a>' +
+      '<a href="' + escapeAttr(openUrl) + '" download="' + escapeAttr(item.name) + '">下载文件</a>' +
       '</div>';
     container.appendChild(div);
   }
@@ -3020,6 +3055,8 @@
       openLightbox(item, false);
     } else if (action === 'detail') {
       void openDetail(item);
+    } else if (action === 'tag') {
+      void openDetailForTags(item);
     } else if (action === 'fullscreen') {
       openLightboxFullscreen(item);
     } else if (action === 'delete') {

@@ -482,6 +482,16 @@
       background: rgba(17,24,39,.65);
       color: #fff;
       letter-spacing: 0.04em;
+      pointer-events: none;
+      max-width: calc(100% - 16px);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    /* 类型徽章只贴在缩略图内，避免盖住下方文件名/日期 */
+    .card > .type-badge { display: none; }
+    .thumb-wrap .type-badge {
+      display: inline-block;
     }
     .thumb-wrap {
       aspect-ratio: 1;
@@ -1616,8 +1626,11 @@
     }
     .tag-editor {
       margin-top: 16px;
-      padding-top: 14px;
+      padding: 12px;
       border-top: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(79, 110, 247, 0.06);
+      border: 1px solid rgba(79, 110, 247, 0.18);
     }
     .lightbox-info .tag-editor {
       border-top-color: rgba(255,255,255,.12);
@@ -1920,7 +1933,7 @@
       allowedLogins: []
     };
   </script>
-  <script src="gallery-app.js?v=approute"></script>
+  <script src="gallery-app.js?v=tagux"></script>
   <script>
     GalleryApp.init({ items: [], oldMap: {} });
   </script>
