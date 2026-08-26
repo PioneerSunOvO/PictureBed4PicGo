@@ -7,7 +7,8 @@
  * 3. 重复/相似分组审阅（读 meta/similar-index.json）
  * 4. 加密标签持久化（meta/asset-tags.enc.json）
  * 5. 展示别名（meta/asset-aliases.json，不改仓库文件名）
- * 5. Hash 路由：菜单、预览、详情、对比均可分享链接
+ * 6. 标签视觉：类型图标 / 首字母 / 自定义色板（meta/tag-style.json）
+ * 7. Hash 路由：菜单、预览、详情、对比均可分享链接
  *
  * 全局状态集中在文件顶部 let/const；UI 通过 innerHTML 渲染。
  * 写操作需 GitHub PAT（sessionStorage），读公开 images/ 无需登录。
@@ -77,7 +78,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'alias';
+  const ASSET_VERSION = 'tagstyle';
   /** 公开图床根路径（PicGo 默认）；Markdown 外链指向此目录 */
   const PUBLIC_PREFIX = 'images/';
   /** 私有目录；列表需登录，预览走 blob 或可选 Worker 代理 */
@@ -650,8 +651,14 @@
     return out;
   }
 
-  /** GitHub Labels 风格：标签名哈希到固定色板，同一标签始终同色 */
-  const TAG_PALETTE = [
+  /**
+   * 标签视觉：GitHub Labels 色板 + 类型图标 + 首字母 fallback。
+   * 自定义：localStorage `pb4pg_tag_style` 或仓库 `meta/tag-style.json`
+   *   { palette, colors: { "旅行": "#0969da" }, icons: { "旅行": "travel" } }
+   */
+  const TAG_STYLE_META_PATH = 'meta/tag-style.json';
+  const TAG_STYLE_LOCAL_KEY = 'pb4pg_tag_style';
+  const TAG_PALETTE_DEFAULT = [
     { bg: '#ddf4ff', border: 'rgba(84, 174, 255, 0.45)', text: '#0969da', icon: '#0969da' },
     { bg: '#dafbe1', border: 'rgba(74, 194, 107, 0.45)', text: '#1a7f37', icon: '#1a7f37' },
     { bg: '#fff8c5', border: 'rgba(212, 167, 44, 0.45)', text: '#9a6700', icon: '#9a6700' },
@@ -661,6 +668,35 @@
     { bg: '#e6fffa', border: 'rgba(84, 211, 199, 0.45)', text: '#096761', icon: '#096761' },
     { bg: '#fff1e5', border: 'rgba(255, 183, 124, 0.45)', text: '#bc4c00', icon: '#bc4c00' }
   ];
+  /** 内置类型：关键词命中 → 图标 key（自定义 icons 可覆盖） */
+  const TAG_TYPE_BUILTIN = [
+    { icon: 'people', keys: ['人', '人物', '肖像', '自拍', 'selfie', 'people', 'person', 'portrait', 'face'] },
+    { icon: 'travel', keys: ['旅行', '旅游', '出行', 'travel', 'trip', 'vacation', 'journey'] },
+    { icon: 'place', keys: ['风景', '景点', '城市', '建筑', 'place', 'city', 'landscape', 'scenic'] },
+    { icon: 'nature', keys: ['自然', '花', '树', '山', '海', 'nature', 'flower', 'forest', 'beach', 'mountain'] },
+    { icon: 'food', keys: ['美食', '吃', '餐', 'food', 'meal', 'cafe', '咖啡', 'dessert'] },
+    { icon: 'work', keys: ['工作', '办公', '会议', 'work', 'office', 'meeting', 'job'] },
+    { icon: 'photo', keys: ['摄影', '拍照', 'photo', 'camera', '拍摄'] },
+    { icon: 'star', keys: ['收藏', '喜欢', '精选', 'favorite', 'star', 'fav', 'like'] },
+    { icon: 'music', keys: ['音乐', '歌', 'music', 'audio', 'song'] },
+    { icon: 'doc', keys: ['文档', '笔记', 'doc', 'note', 'text', 'md'] },
+    { icon: 'private', keys: ['私密', '私有', 'secret', 'private', 'vault'] }
+  ];
+  const TAG_ICON_PATHS = {
+    tag: 'M2 3.5A1.5 1.5 0 0 1 3.5 2h2.879a1.5 1.5 0 0 1 1.06.44l2.122 2.12a1.5 1.5 0 0 0 1.06.44H13.5A1.5 1.5 0 0 1 15 6.5v6.75A1.5 1.5 0 0 1 13.5 14.5h-9A1.5 1.5 0 0 1 3 13V3.5Zm3.25 1.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z',
+    people: 'M10.5 8a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0ZM5.5 13.5a4.5 4.5 0 0 1 9 0 .5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5Z',
+    travel: 'M2.5 9.5 8.5 2l6 7.5H11v4.5H6V9.5H2.5Z',
+    place: 'M8 1.5a4.5 4.5 0 0 0-4.5 4.5c0 3.1 4.5 8.5 4.5 8.5s4.5-5.4 4.5-8.5A4.5 4.5 0 0 0 8 1.5Zm0 6.2a1.7 1.7 0 1 1 0-3.4 1.7 1.7 0 0 1 0 3.4Z',
+    nature: 'M8 14.5V9.2c-2.2 0-4-1.4-4-3.7C4 3.2 6.2 1.5 8 1.5s4 1.7 4 4c0 2.3-1.8 3.7-4 3.7v5.3Z',
+    food: 'M4 2.5v5a2 2 0 0 0 2 2v6h1.5V9.5a2 2 0 0 0 2-2v-5H4Zm7 0v11h1.5v-6H14V7a4.5 4.5 0 0 0-3-4.5Z',
+    work: 'M5.5 3.5A1.5 1.5 0 0 1 7 2h2a1.5 1.5 0 0 1 1.5 1.5V5h3A1.5 1.5 0 0 1 15 6.5v6A1.5 1.5 0 0 1 13.5 14h-11A1.5 1.5 0 0 1 1 12.5v-6A1.5 1.5 0 0 1 2.5 5h3V3.5ZM7 5h2V3.5H7V5Z',
+    photo: 'M2.5 4.5A1.5 1.5 0 0 1 4 3h2.1l.7-1h2.4l.7 1H12a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 12 14H4a1.5 1.5 0 0 1-1.5-1.5v-8ZM8 11.5A2.75 2.75 0 1 0 8 6a2.75 2.75 0 0 0 0 5.5Z',
+    star: 'M8 1.5 9.76 5.9l4.74.4-3.6 3.1 1.1 4.6L8 11.7l-3.99 2.3 1.1-4.6-3.6-3.1 4.74-.4L8 1.5Z',
+    music: 'M6 13.5a2 2 0 1 1-1.5-1.94V4.2l7-1.4v8.76a2 2 0 1 1-1.5-1.94V4.9L6 5.9v7.6Z',
+    doc: 'M3.5 2A1.5 1.5 0 0 0 2 3.5v9A1.5 1.5 0 0 0 3.5 14h9A1.5 1.5 0 0 0 14 12.5V6.12a1.5 1.5 0 0 0-.44-1.06L10.94 2.44A1.5 1.5 0 0 0 9.88 2H3.5Zm6 1.5V6h2.5L9.5 3.5ZM5 8h6v1.25H5V8Zm0 2.5h6V11.75H5V10.5Z',
+    private: 'M8 1.5A3.5 3.5 0 0 0 4.5 5v1.5H3.75A1.25 1.25 0 0 0 2.5 7.75v4.5A1.25 1.25 0 0 0 3.75 13.5h8.5a1.25 1.25 0 0 0 1.25-1.25v-4.5A1.25 1.25 0 0 0 12.25 6.5H11.5V5A3.5 3.5 0 0 0 8 1.5Zm2 5V5a2 2 0 1 0-4 0v1.5h4Z'
+  };
+  let tagStyleCustom = { palette: null, colors: {}, icons: {} };
 
   function hashTagName(name) {
     let h = 5381;
@@ -669,8 +705,126 @@
     return Math.abs(h);
   }
 
+  function parseHexColor(input) {
+    const s = String(input || '').trim().replace(/^#/, '');
+    if (!/^[0-9a-fA-F]{6}$/.test(s) && !/^[0-9a-fA-F]{3}$/.test(s)) return null;
+    const hex = s.length === 3 ? s.split('').map(c => c + c).join('') : s;
+    return {
+      r: parseInt(hex.slice(0, 2), 16),
+      g: parseInt(hex.slice(2, 4), 16),
+      b: parseInt(hex.slice(4, 6), 16),
+      hex: '#' + hex.toLowerCase()
+    };
+  }
+
+  function paletteFromHex(hexInput) {
+    const c = parseHexColor(hexInput);
+    if (!c) return null;
+    return {
+      bg: 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',0.16)',
+      border: 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',0.42)',
+      text: c.hex,
+      icon: c.hex
+    };
+  }
+
+  function normalizePaletteEntry(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    if (raw.hex || (typeof raw === 'string')) {
+      return paletteFromHex(raw.hex || raw);
+    }
+    if (!raw.bg || !raw.text) return null;
+    return {
+      bg: String(raw.bg),
+      border: String(raw.border || raw.bg),
+      text: String(raw.text),
+      icon: String(raw.icon || raw.text)
+    };
+  }
+
+  function activeTagPalette() {
+    const custom = tagStyleCustom.palette;
+    if (Array.isArray(custom) && custom.length) {
+      const list = custom.map(normalizePaletteEntry).filter(Boolean);
+      if (list.length) return list;
+    }
+    return TAG_PALETTE_DEFAULT;
+  }
+
+  function applyTagStyleObject(obj, merge) {
+    if (!obj || typeof obj !== 'object') return;
+    const next = {
+      palette: merge ? tagStyleCustom.palette : null,
+      colors: merge ? Object.assign({}, tagStyleCustom.colors) : {},
+      icons: merge ? Object.assign({}, tagStyleCustom.icons) : {}
+    };
+    if (Array.isArray(obj.palette)) next.palette = obj.palette;
+    if (obj.colors && typeof obj.colors === 'object') {
+      Object.keys(obj.colors).forEach(k => {
+        next.colors[String(k).toLowerCase()] = String(obj.colors[k] || '');
+      });
+    }
+    if (obj.icons && typeof obj.icons === 'object') {
+      Object.keys(obj.icons).forEach(k => {
+        next.icons[String(k).toLowerCase()] = String(obj.icons[k] || '').toLowerCase();
+      });
+    }
+    tagStyleCustom = next;
+  }
+
+  function loadTagStyleFromLocal() {
+    try {
+      const raw = localStorage.getItem(TAG_STYLE_LOCAL_KEY);
+      if (!raw) return;
+      applyTagStyleObject(JSON.parse(raw), true);
+    } catch (_) { /* ignore */ }
+  }
+
+  async function loadTagStyleFromRepo() {
+    try {
+      const meta = await ghFetch('/contents/' + encodePath(TAG_STYLE_META_PATH) + '?ref=' + REPO.branch + '&_=' + Date.now());
+      if (!meta || !meta.content) return;
+      const text = atob(meta.content.replace(/\s/g, ''));
+      applyTagStyleObject(JSON.parse(text), false);
+      loadTagStyleFromLocal();
+    } catch (_) { /* optional file */ }
+  }
+
+  function tagInitial(name) {
+    const s = String(name || '').trim();
+    if (!s) return '#';
+    try {
+      const ch = [...s][0] || '#';
+      return /[a-z]/i.test(ch) ? ch.toUpperCase() : ch;
+    } catch (_) {
+      return s.charAt(0).toUpperCase();
+    }
+  }
+
+  function resolveTagIconKey(name) {
+    const lower = String(name || '').trim().toLowerCase();
+    if (!lower) return null;
+    if (tagStyleCustom.icons[lower] && TAG_ICON_PATHS[tagStyleCustom.icons[lower]]) {
+      return tagStyleCustom.icons[lower];
+    }
+    for (let i = 0; i < TAG_TYPE_BUILTIN.length; i++) {
+      const rule = TAG_TYPE_BUILTIN[i];
+      for (let j = 0; j < rule.keys.length; j++) {
+        const key = rule.keys[j].toLowerCase();
+        if (lower === key || lower.includes(key)) return rule.icon;
+      }
+    }
+    return null;
+  }
+
   function tagPaletteOf(name) {
-    return TAG_PALETTE[hashTagName(name) % TAG_PALETTE.length];
+    const lower = String(name || '').trim().toLowerCase();
+    if (lower && tagStyleCustom.colors[lower]) {
+      const fromHex = paletteFromHex(tagStyleCustom.colors[lower]);
+      if (fromHex) return fromHex;
+    }
+    const palette = activeTagPalette();
+    return palette[hashTagName(name) % palette.length];
   }
 
   function tagChipStyle(name) {
@@ -678,24 +832,39 @@
     return '--tag-bg:' + p.bg + ';--tag-border:' + p.border + ';--tag-text:' + p.text + ';--tag-icon:' + p.icon;
   }
 
-  const TAG_ICON_SVG = '<svg class="tag-chip-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M2 3.5A1.5 1.5 0 0 1 3.5 2h2.879a1.5 1.5 0 0 1 1.06.44l2.122 2.12a1.5 1.5 0 0 0 1.06.44H13.5A1.5 1.5 0 0 1 15 6.5v6.75A1.5 1.5 0 0 1 13.5 14.5h-9A1.5 1.5 0 0 1 3 13V3.5Zm3.25 1.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z" clip-rule="evenodd"/></svg>';
+  function tagIconSvg(iconKey, extraClass) {
+    const path = TAG_ICON_PATHS[iconKey] || TAG_ICON_PATHS.tag;
+    const cls = 'tag-chip-icon' + (extraClass ? ' ' + extraClass : '');
+    return '<svg class="' + cls + '" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="' + path + '" clip-rule="evenodd"/></svg>';
+  }
 
-  const TAG_ICON_OUTLINE_SVG = '<svg class="tag-chip-icon tag-chip-icon--outline" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M3.5 1.5A2 2 0 0 0 1.5 3.5v9A2 2 0 0 0 3.5 14.5h6.879a2 2 0 0 0 1.414-.586l4.122-4.121a2 2 0 0 0 .586-1.414V3.5a2 2 0 0 0-2-2h-9Zm2.75 3.5a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z" clip-rule="evenodd"/></svg>';
+  const TAG_ICON_OUTLINE_SVG = tagIconSvg('tag', 'tag-chip-icon--outline');
+
+  function tagChipMarkHtml(name, compact) {
+    const iconKey = resolveTagIconKey(name);
+    if (iconKey) return tagIconSvg(iconKey);
+    if (compact) {
+      return '<span class="tag-chip-initial" aria-hidden="true">' + escapeHtml(tagInitial(name)) + '</span>';
+    }
+    return tagIconSvg('tag');
+  }
 
   function tagChipHtml(name, opts) {
     opts = opts || {};
     const extraClass = opts.extraClass || '';
     const compact = !!opts.compact;
     const editable = !!opts.editable;
+    const iconKey = resolveTagIconKey(name);
     let cls = 'tag-chip';
     if (extraClass) cls += ' ' + extraClass;
     if (compact) cls += ' tag-chip--compact';
+    if (!iconKey && compact) cls += ' tag-chip--initial';
     let attrs = ' style="' + tagChipStyle(name) + '" title="' + escapeAttr(name) + '"';
     if (opts.dataTag) attrs += ' data-tag="' + escapeAttr(name) + '"';
     const removeBtn = editable
       ? '<button type="button" data-tag-remove="' + escapeAttr(name) + '" aria-label="移除">×</button>'
       : '';
-    return '<span class="' + cls + '"' + attrs + '>' + TAG_ICON_SVG +
+    return '<span class="' + cls + '"' + attrs + '>' + tagChipMarkHtml(name, compact) +
       '<span class="tag-chip-label">' + escapeHtml(name) + '</span>' + removeBtn + '</span>';
   }
 
@@ -3725,6 +3894,7 @@
       if (token()) {
         try { await loadTagsEnvelope(); } catch (_) { /* ignore */ }
         try { await loadAliases(); } catch (_) { /* ignore */ }
+        try { await loadTagStyleFromRepo(); } catch (_) { /* ignore */ }
         await ensureTagIds(ITEMS);
         await ensureAliasIds(ITEMS);
       }
@@ -4287,6 +4457,9 @@
     });
     OLD_MAP = opts.oldMap || {};
     loadNameDisplayMode();
+    loadTagStyleFromLocal();
+    if (global.TAG_STYLE) applyTagStyleObject(global.TAG_STYLE, true);
+    if (securityCfg().tagStyle) applyTagStyleObject(securityCfg().tagStyle, true);
     rebuildDupIndex();
     updateCategoryCounts();
     bindEvents();
@@ -4331,5 +4504,21 @@
     await applyRouteFromHash();
   }
 
-  global.GalleryApp = { init, refreshFromGitHub };
+  function setTagStyle(styleObj, opts) {
+    opts = opts || {};
+    applyTagStyleObject(styleObj || {}, !!opts.merge);
+    if (opts.persist !== false) {
+      try {
+        localStorage.setItem(TAG_STYLE_LOCAL_KEY, JSON.stringify({
+          v: 1,
+          palette: tagStyleCustom.palette,
+          colors: tagStyleCustom.colors,
+          icons: tagStyleCustom.icons
+        }));
+      } catch (_) { /* ignore */ }
+    }
+    void filter();
+  }
+
+  global.GalleryApp = { init, refreshFromGitHub, setTagStyle };
 })(window);

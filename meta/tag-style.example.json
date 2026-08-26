@@ -1,0 +1,26 @@
+{
+  "v": 1,
+  "palette": [
+    { "bg": "#ddf4ff", "border": "rgba(84, 174, 255, 0.45)", "text": "#0969da", "icon": "#0969da" },
+    { "bg": "#dafbe1", "border": "rgba(74, 194, 107, 0.45)", "text": "#1a7f37", "icon": "#1a7f37" },
+    { "bg": "#fff8c5", "border": "rgba(212, 167, 44, 0.45)", "text": "#9a6700", "icon": "#9a6700" },
+    { "bg": "#ffebe9", "border": "rgba(255, 129, 130, 0.45)", "text": "#cf222e", "icon": "#cf222e" },
+    { "bg": "#fbefff", "border": "rgba(194, 151, 255, 0.45)", "text": "#8250df", "icon": "#8250df" },
+    { "bg": "#ffeff7", "border": "rgba(255, 128, 200, 0.45)", "text": "#bf3989", "icon": "#bf3989" },
+    { "bg": "#e6fffa", "border": "rgba(84, 211, 199, 0.45)", "text": "#096761", "icon": "#096761" },
+    { "bg": "#fff1e5", "border": "rgba(255, 183, 124, 0.45)", "text": "#bc4c00", "icon": "#bc4c00" }
+  ],
+  "colors": {
+    "旅行": "#0969da",
+    "人物": "#8250df",
+    "美食": "#bc4c00",
+    "工作": "#1a7f37"
+  },
+  "icons": {
+    "旅行": "travel",
+    "人物": "people",
+    "美食": "food",
+    "工作": "work",
+    "收藏": "star"
+  }
+}

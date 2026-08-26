@@ -1726,6 +1726,19 @@
       color: var(--tag-icon, currentColor);
       opacity: 0.95;
     }
+    .tag-chip-initial {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 11px;
+      height: 11px;
+      flex-shrink: 0;
+      font-size: 0.58rem;
+      font-weight: 700;
+      line-height: 1;
+      color: var(--tag-icon, currentColor);
+      letter-spacing: -0.02em;
+    }
     .tag-chip-label {
       overflow: hidden;
       text-overflow: ellipsis;
@@ -1746,9 +1759,11 @@
       width: 0;
       overflow: hidden;
     }
-    .tag-chip--compact .tag-chip-icon {
+    .tag-chip--compact .tag-chip-icon,
+    .tag-chip--compact .tag-chip-initial {
       width: 10px;
       height: 10px;
+      font-size: 0.55rem;
     }
     .card-user-tags:hover .tag-stack .tag-chip--compact,
     .card-user-tags:focus-visible .tag-stack .tag-chip--compact {
@@ -1763,6 +1778,12 @@
     .card-user-tags:focus-visible .tag-stack .tag-chip--compact .tag-chip-label {
       display: inline;
       width: auto;
+    }
+    .card-user-tags:hover .tag-stack .tag-chip--compact .tag-chip-initial,
+    .card-user-tags:focus-visible .tag-stack .tag-chip--compact .tag-chip-initial {
+      width: 11px;
+      height: 11px;
+      font-size: 0.58rem;
     }
     .tag-chip.tag-locked {
       background: rgba(15, 23, 42, 0.7);
@@ -2119,7 +2140,7 @@
       allowedLogins: []
     };
   </script>
-  <script src="gallery-app.js?v=alias"></script>
+  <script src="gallery-app.js?v=tagstyle"></script>
   <script>
     GalleryApp.init({ items: [], oldMap: {} });
   </script>
