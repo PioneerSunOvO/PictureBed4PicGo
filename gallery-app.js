@@ -51,15 +51,26 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'lbgroupnav';
+  const ASSET_VERSION = 'tagsenc';
   const PUBLIC_PREFIX = 'images/';
   const PRIVATE_PREFIX = 'private/';
+  const TAGS_META_PATH = 'meta/asset-tags.enc.json';
+  const TAGS_PASS_SESSION_KEY = 'pb4pg_tags_pass';
+  const TAGS_PBKDF2_ITER = 600000;
   const ACTIONS_SIMILAR_URL =
     'https://github.com/PioneerSunOvO/PictureBed4PicGo/actions/workflows/similar-index.yml';
   /** Latest master commit — pin CDN/Raw URLs to avoid @master cache lag. */
   let repoHeadCommit = null;
   /** rel -> { url, expMs, revoke? } */
   const privateUrlCache = new Map();
+  /** Encrypted tags: entryId -> string[] after unlock */
+  let tagsById = new Map();
+  let tagsEnvelope = null;
+  let tagsFileSha = null;
+  let tagsCryptoKey = null;
+  let tagsSalt = null;
+  let tagsUnlocked = false;
+  let tagsBusy = false;
 
   function securityCfg() { return global.SECURITY || {}; }
   function requireGalleryLogin() { return securityCfg().requireLogin !== false; }
@@ -138,9 +149,7 @@
   }
 
   function canLightboxPreview(item) {
-    if (!item) return false;
-    return item.kind === 'image' || item.kind === 'video' || item.kind === 'audio' ||
-      item.kind === 'document' || item.kind === 'text';
+    return !!item;
   }
 
   function supportsLbFullscreen(item) {
@@ -208,6 +217,373 @@
     if (inCode) out.push('<pre class="md-code"><code>' + escapeHtml(codeBuf.join('\n')) + '</code></pre>');
     closeList();
     return out.join('');
+  }
+
+  /* ——— Encrypted asset tags (AES-256-GCM + PBKDF2, Web Crypto) ——— */
+
+  function b64FromBytes(bytes) {
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }
+
+  function bytesFromB64(b64) {
+    const binary = atob(String(b64 || '').replace(/\s/g, ''));
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+  }
+
+  async function sha256Hex(text) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text || '')));
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  async function tagEntryIdForRel(rel) {
+    return sha256Hex('pb4pg-tag:' + String(rel || ''));
+  }
+
+  async function deriveTagsKey(passphrase, saltBytes, iterations) {
+    const baseKey = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(passphrase),
+      'PBKDF2',
+      false,
+      ['deriveKey']
+    );
+    return crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: saltBytes, iterations: iterations || TAGS_PBKDF2_ITER, hash: 'SHA-256' },
+      baseKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt']
+    );
+  }
+
+  async function encryptTagPayload(tagsArr, key) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const plain = new TextEncoder().encode(JSON.stringify({ t: tagsArr }));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, tagLength: 128 }, key, plain);
+    return { iv: b64FromBytes(iv), data: b64FromBytes(new Uint8Array(ct)) };
+  }
+
+  async function decryptTagPayload(entry, key) {
+    const iv = bytesFromB64(entry.iv);
+    const data = bytesFromB64(entry.data);
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, tagLength: 128 }, key, data);
+    const obj = JSON.parse(new TextDecoder().decode(plain));
+    const tags = Array.isArray(obj.t) ? obj.t : (Array.isArray(obj) ? obj : []);
+    return tags.map(t => String(t).trim()).filter(Boolean);
+  }
+
+  function normalizeTagList(list) {
+    const seen = new Set();
+    const out = [];
+    (list || []).forEach(raw => {
+      const t = String(raw || '').trim().slice(0, 48);
+      if (!t) return;
+      const key = t.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(t);
+    });
+    return out;
+  }
+
+  function getSessionTagPass() {
+    try { return sessionStorage.getItem(TAGS_PASS_SESSION_KEY) || ''; } catch (_) { return ''; }
+  }
+
+  function setSessionTagPass(pass) {
+    try {
+      if (pass) sessionStorage.setItem(TAGS_PASS_SESSION_KEY, pass);
+      else sessionStorage.removeItem(TAGS_PASS_SESSION_KEY);
+    } catch (_) { /* ignore */ }
+  }
+
+  function hasEncryptedTagEntry(rel) {
+    if (!tagsEnvelope || !tagsEnvelope.entries || !rel) return false;
+    const id = tagIdCache.get(rel);
+    return !!(id && tagsEnvelope.entries[id]);
+  }
+
+  const tagIdCache = new Map();
+
+  async function ensureTagIds(items) {
+    const list = items || ITEMS;
+    await Promise.all(list.map(async item => {
+      if (!item || !item.newRel) return;
+      if (tagIdCache.has(item.newRel)) {
+        item._tagId = tagIdCache.get(item.newRel);
+        return;
+      }
+      const id = await tagEntryIdForRel(item.newRel);
+      tagIdCache.set(item.newRel, id);
+      item._tagId = id;
+    }));
+  }
+
+  function tagsBadgeHtmlSync(item) {
+    if (!item) return '';
+    const id = item._tagId || tagIdCache.get(item.newRel);
+    if (!id) return '';
+    if (tagsUnlocked) return itemTagsChipHtml(tagsById.get(id) || []);
+    if (tagsEnvelope && tagsEnvelope.entries && tagsEnvelope.entries[id]) {
+      return itemTagsChipHtml(null, true);
+    }
+    return '';
+  }
+
+  async function tagsForItem(item) {
+    if (!item || !tagsUnlocked) return [];
+    const id = item._tagId || await tagEntryIdForRel(item.newRel);
+    item._tagId = id;
+    return tagsById.get(id) || [];
+  }
+
+  function updateTagsUnlockUI() {
+    const btn = document.getElementById('tagsUnlockBtn');
+    const lockHint = document.getElementById('tagsLockHint');
+    const entryCount = tagsEnvelope && tagsEnvelope.entries
+      ? Object.keys(tagsEnvelope.entries).length : 0;
+    if (btn) {
+      btn.textContent = tagsUnlocked ? '锁定标签' : (entryCount ? '解锁标签' : '设置标签口令');
+      btn.classList.toggle('primary', !tagsUnlocked);
+    }
+    if (lockHint) {
+      if (tagsUnlocked) lockHint.textContent = '标签已解锁 · ' + tagsById.size + ' 个文件';
+      else if (entryCount) lockHint.textContent = '标签已加密存储 · ' + entryCount + ' 条密文';
+      else lockHint.textContent = '标签密文未创建 · 添加首个标签时写入仓库';
+    }
+  }
+
+  async function loadTagsEnvelope() {
+    tagsEnvelope = null;
+    tagsFileSha = null;
+    tagsById = new Map();
+    tagsUnlocked = false;
+    tagsCryptoKey = null;
+    tagsSalt = null;
+    try {
+      const meta = await ghFetch('/contents/' + encodePath(TAGS_META_PATH) + '?ref=' + REPO.branch + '&_=' + Date.now());
+      if (meta && meta.content) {
+        tagsFileSha = meta.sha;
+        const text = atob(meta.content.replace(/\s/g, ''));
+        tagsEnvelope = JSON.parse(text);
+      }
+    } catch (_) {
+      tagsEnvelope = { v: 1, alg: 'AES-256-GCM', kdf: 'PBKDF2-SHA256', iter: TAGS_PBKDF2_ITER, salt: '', entries: {} };
+    }
+    if (!tagsEnvelope || typeof tagsEnvelope !== 'object') {
+      tagsEnvelope = { v: 1, alg: 'AES-256-GCM', kdf: 'PBKDF2-SHA256', iter: TAGS_PBKDF2_ITER, salt: '', entries: {} };
+    }
+    if (!tagsEnvelope.entries) tagsEnvelope.entries = {};
+    updateTagsUnlockUI();
+    const saved = getSessionTagPass();
+    if (saved) {
+      try { await unlockTags(saved, true); } catch (_) { setSessionTagPass(''); }
+    }
+  }
+
+  async function unlockTags(passphrase, silent) {
+    const pass = String(passphrase || '').trim();
+    if (pass.length < 6) throw new Error('标签口令至少 6 位');
+    let saltBytes;
+    let iter = TAGS_PBKDF2_ITER;
+    const entries = (tagsEnvelope && tagsEnvelope.entries) || {};
+    const hasEntries = Object.keys(entries).length > 0;
+    if (hasEntries) {
+      if (!tagsEnvelope.salt) throw new Error('标签密文缺少 salt');
+      saltBytes = bytesFromB64(tagsEnvelope.salt);
+      iter = tagsEnvelope.iter || TAGS_PBKDF2_ITER;
+    } else {
+      saltBytes = crypto.getRandomValues(new Uint8Array(16));
+    }
+    const key = await deriveTagsKey(pass, saltBytes, iter);
+    const nextMap = new Map();
+    if (hasEntries) {
+      const ids = Object.keys(entries);
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i];
+        try {
+          const tags = await decryptTagPayload(entries[id], key);
+          nextMap.set(id, normalizeTagList(tags));
+        } catch (e) {
+          throw new Error('口令错误或密文已损坏');
+        }
+      }
+    }
+    tagsCryptoKey = key;
+    tagsSalt = saltBytes;
+    tagsById = nextMap;
+    tagsUnlocked = true;
+    if (!hasEntries) {
+      tagsEnvelope = {
+        v: 1,
+        alg: 'AES-256-GCM',
+        kdf: 'PBKDF2-SHA256',
+        iter: TAGS_PBKDF2_ITER,
+        salt: b64FromBytes(saltBytes),
+        entries: {}
+      };
+    }
+    setSessionTagPass(pass);
+    updateTagsUnlockUI();
+    if (!silent) setStatus('标签已解锁', 'ok');
+    void filter();
+    if (detailItem) void openDetail(detailItem);
+    if (lbInfoOpen) void syncLbInfoIfOpen();
+  }
+
+  function lockTags() {
+    tagsUnlocked = false;
+    tagsCryptoKey = null;
+    tagsById = new Map();
+    setSessionTagPass('');
+    updateTagsUnlockUI();
+    void filter();
+    if (detailItem) void openDetail(detailItem);
+    if (lbInfoOpen) void syncLbInfoIfOpen();
+    setStatus('标签已锁定', 'ok');
+  }
+
+  async function persistTagsEnvelope() {
+    if (!token()) throw new Error('请先登录 GitHub');
+    if (!tagsUnlocked || !tagsCryptoKey || !tagsSalt) throw new Error('请先解锁标签');
+    const entries = {};
+    const ids = [...tagsById.keys()];
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i];
+      const list = normalizeTagList(tagsById.get(id));
+      if (!list.length) continue;
+      entries[id] = await encryptTagPayload(list, tagsCryptoKey);
+    }
+    const envelope = {
+      v: 1,
+      alg: 'AES-256-GCM',
+      kdf: 'PBKDF2-SHA256',
+      iter: tagsEnvelope && tagsEnvelope.iter ? tagsEnvelope.iter : TAGS_PBKDF2_ITER,
+      salt: b64FromBytes(tagsSalt),
+      entries
+    };
+    const json = JSON.stringify(envelope, null, 2);
+    const contentBase64 = b64FromBytes(new TextEncoder().encode(json));
+    const result = await putFileViaGit(TAGS_META_PATH, contentBase64, 'gallery: update encrypted asset tags');
+    tagsEnvelope = envelope;
+    tagsFileSha = result && result.content ? result.content.sha : tagsFileSha;
+    if (result && result.commitSha) bumpRepoHead(result.commitSha);
+    updateTagsUnlockUI();
+  }
+
+  async function setItemTags(item, tagsArr) {
+    if (!item) return;
+    if (!tagsUnlocked || !tagsCryptoKey) throw new Error('请先解锁标签口令');
+    const id = item._tagId || await tagEntryIdForRel(item.newRel);
+    item._tagId = id;
+    const list = normalizeTagList(tagsArr);
+    if (list.length) tagsById.set(id, list);
+    else tagsById.delete(id);
+    tagsBusy = true;
+    try {
+      await persistTagsEnvelope();
+      setStatus('标签已加密保存到仓库', 'ok');
+    } finally {
+      tagsBusy = false;
+    }
+    void filter();
+    if (detailItem && detailItem.newRel === item.newRel) void openDetail(item);
+    if (lbInfoOpen) void syncLbInfoIfOpen();
+  }
+
+  async function migrateItemTags(oldRel, newRel) {
+    if (!tagsUnlocked || !oldRel || !newRel || oldRel === newRel) return;
+    const oldId = await tagEntryIdForRel(oldRel);
+    const newId = await tagEntryIdForRel(newRel);
+    if (!tagsById.has(oldId)) return;
+    tagsById.set(newId, tagsById.get(oldId));
+    tagsById.delete(oldId);
+    await persistTagsEnvelope();
+  }
+
+  function itemTagsChipHtml(tags, lockedHint) {
+    if (lockedHint) {
+      return '<span class="tag-chip tag-locked" title="已加密，解锁后可见">🔒</span>';
+    }
+    if (!tags || !tags.length) return '';
+    return tags.slice(0, 4).map(t =>
+      '<span class="tag-chip" title="' + escapeAttr(t) + '">' + escapeHtml(t) + '</span>'
+    ).join('') + (tags.length > 4 ? '<span class="tag-chip tag-more">+' + (tags.length - 4) + '</span>' : '');
+  }
+
+  function buildTagEditorHtml(item, tags) {
+    if (!token()) {
+      return '<div class="tag-editor muted">登录后可管理加密标签</div>';
+    }
+    if (!tagsUnlocked) {
+      return '<div class="tag-editor">' +
+        '<div class="tag-editor-title">标签（AES-256-GCM 加密）</div>' +
+        '<p class="tag-editor-hint">标签口令未解锁。仓库内仅存密文，解锁后可查看与编辑。</p>' +
+        '<button type="button" class="primary" data-tag-action="unlock">解锁 / 设置口令</button>' +
+        '</div>';
+    }
+    const chips = (tags || []).map(t =>
+      '<span class="tag-chip editable" data-tag="' + escapeAttr(t) + '">' +
+      escapeHtml(t) + '<button type="button" data-tag-remove="' + escapeAttr(t) + '" aria-label="移除">×</button></span>'
+    ).join('');
+    return '<div class="tag-editor" data-tag-rel="' + escapeAttr(item.newRel) + '">' +
+      '<div class="tag-editor-title">标签（已加密持久化）</div>' +
+      '<div class="tag-chip-row" id="tagChipRow">' + (chips || '<span class="tag-empty">暂无标签</span>') + '</div>' +
+      '<div class="tag-add-row">' +
+      '<input type="text" id="tagInput" maxlength="48" placeholder="输入标签后回车">' +
+      '<button type="button" class="primary" data-tag-action="add">添加</button>' +
+      '</div>' +
+      '<p class="tag-editor-hint">口令仅存于本会话；密文提交到 meta/asset-tags.enc.json</p>' +
+      '</div>';
+  }
+
+  async function promptUnlockTags() {
+    const has = tagsEnvelope && tagsEnvelope.entries && Object.keys(tagsEnvelope.entries).length;
+    const msg = has
+      ? '输入标签口令以解密（AES-256-GCM）'
+      : '设置新的标签口令（至少 6 位，用于加密仓库内标签密文）';
+    const pass = prompt(msg, '');
+    if (pass == null) return;
+    try {
+      await unlockTags(pass, false);
+    } catch (e) {
+      setStatus(e.message || String(e), 'err');
+    }
+  }
+
+  async function handleTagEditorEvent(e, item) {
+    if (!item) return;
+    const unlockBtn = e.target.closest('[data-tag-action="unlock"]');
+    if (unlockBtn) {
+      e.preventDefault();
+      await promptUnlockTags();
+      return;
+    }
+    const removeBtn = e.target.closest('[data-tag-remove]');
+    if (removeBtn) {
+      e.preventDefault();
+      const name = removeBtn.getAttribute('data-tag-remove');
+      const cur = await tagsForItem(item);
+      await setItemTags(item, cur.filter(t => t !== name));
+      return;
+    }
+    const addBtn = e.target.closest('[data-tag-action="add"]');
+    const input = (e.target.closest('.tag-editor') || document).querySelector('#tagInput');
+    if (addBtn || (e.type === 'keydown' && e.key === 'Enter' && e.target && e.target.id === 'tagInput')) {
+      e.preventDefault();
+      const val = input ? input.value : '';
+      if (!String(val).trim()) return;
+      const cur = await tagsForItem(item);
+      await setItemTags(item, cur.concat([val]));
+      if (input) input.value = '';
+    }
   }
 
   function validDate(y, mo, d, h, mi, s) {
@@ -1207,6 +1583,23 @@
     return '<span class="private-badge" title="私有：可复制私链到其他设备，不建议写进公开 Markdown">私有</span>';
   }
 
+  function cardBadgesHtml(item) {
+    let html = '<div class="card-badges">';
+    if (item.isPrivate) html += privateBadgeHtml();
+    html += tagsBadgeHtmlSync(item);
+    html += '</div>';
+    return html;
+  }
+
+  function cardHoverHtml(item, hasToken) {
+    return '<div class="card-hover">' +
+      '<button type="button" data-action="copy-url">' + (item.isPrivate ? '私链' : '链接') + '</button>' +
+      '<button type="button" data-action="preview">预览</button>' +
+      '<button type="button" data-action="detail">详情</button>' +
+      (hasToken ? '<button type="button" class="del" data-action="delete">删除</button>' : '') +
+      '</div>';
+  }
+
   function escapeHtml(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
@@ -1290,7 +1683,7 @@
       html += '<input type="checkbox" class="card-check"' + (sel ? ' checked' : '') + '>';
     }
     if (isDup && !isKeep) html += '<span class="badge">重复 ×' + item.dupCount + '</span>';
-    if (item.isPrivate) html += privateBadgeHtml();
+    html += cardBadgesHtml(item);
     if (group.type === 'similar' && !isKeep && item.simToKeep != null) {
       const label = formatSimPct(item.simToKeep);
       const pct = Math.round(Math.max(0, Math.min(1, item.simToKeep)) * 100);
@@ -1303,13 +1696,9 @@
     if (group.type === 'similar' && !isKeep && item.phashDistToKeep != null && item.simToKeep == null) {
       html += '<span class="match-path" title="pHash 汉明距离">pHash ' + item.phashDistToKeep + '</span>';
     }
-    if (item.kind !== 'image') html += '<span class="type-badge">' + escapeHtml(item.ext) + '</span>';
+    if (item.kind !== 'image') html += '<span class="type-badge">' + escapeHtml(item.ext || 'file') + '</span>';
     html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
-    html += '<div class="card-hover">';
-    html += '<button type="button" data-action="copy-url">' + (item.isPrivate ? '私链' : '链接') + '</button>';
-    html += '<button type="button" data-action="preview">预览</button>';
-    if (hasToken) html += '<button type="button" class="del" data-action="delete">删除</button>';
-    html += '</div>';
+    html += cardHoverHtml(item, hasToken);
     html += '<div class="card-meta"><div class="card-name">' + escapeHtml(item.name) + '</div>';
     if (item.dateStr) html += '<div class="card-date">' + escapeHtml(item.dateStr) + '</div>';
     html += '</div></article>';
@@ -1462,14 +1851,10 @@
           html += '<input type="checkbox" class="card-check"' + (sel ? ' checked' : '') + '>';
         }
         if (isDup) html += '<span class="badge">重复 ×' + item.dupCount + '</span>';
-        if (item.isPrivate) html += privateBadgeHtml();
-        if (item.kind !== 'image') html += '<span class="type-badge">' + escapeHtml(item.ext) + '</span>';
+        html += cardBadgesHtml(item);
+        if (item.kind !== 'image') html += '<span class="type-badge">' + escapeHtml(item.ext || 'file') + '</span>';
         html += '<div class="thumb-wrap">' + thumbHtml(item, url, false) + '</div>';
-        html += '<div class="card-hover">';
-        html += '<button type="button" data-action="copy-url">' + (item.isPrivate ? '私链' : '链接') + '</button>';
-        html += '<button type="button" data-action="preview">预览</button>';
-        if (hasToken) html += '<button type="button" class="del" data-action="delete">删除</button>';
-        html += '</div>';
+        html += cardHoverHtml(item, hasToken);
         html += '<div class="card-meta"><div class="card-name">' + escapeHtml(item.name) + '</div>';
         if (item.dateStr) html += '<div class="card-date">' + escapeHtml(item.dateStr) + '</div>';
         html += '</div></article>';
@@ -1489,11 +1874,13 @@
       html += '<div class="list-thumb">' + thumbHtml(item, url, true) + '</div>';
       html += '<div class="list-info"><div class="name">' + escapeHtml(item.name);
       if (item.isPrivate) html += ' ' + privateBadgeHtml();
+      html += tagsBadgeHtmlSync(item);
       html += '</div>';
       html += '<div class="sub">' + escapeHtml(item.kind) + (item.dateStr ? ' · ' + item.dateStr : '') + '</div></div>';
       html += '<div class="list-actions">';
       html += '<button type="button" data-action="copy-url">' + (item.isPrivate ? '私链' : '链接') + '</button>';
       html += '<button type="button" data-action="preview">预览</button>';
+      html += '<button type="button" data-action="detail">详情</button>';
       if (hasToken) html += '<button type="button" data-action="delete">删除</button>';
       html += '</div>';
       if (hasToken) {
@@ -1538,6 +1925,7 @@
       }
 
       await ensurePrivateUrls(filtered);
+      await ensureTagIds(filtered);
       container.innerHTML = renderDupGroups(sets, mode);
 
       updateSelUI();
@@ -1563,6 +1951,7 @@
       await ensurePrivateUrls(priv);
     }
 
+    await ensureTagIds(list);
     container.innerHTML = viewMode === 'list' ? renderList(list) : renderGrid(list);
     updateSelUI();
   }
@@ -1768,13 +2157,12 @@
       img.alt = item.name;
       img.src = url;
       preview.appendChild(img);
-    } else if (canLightboxPreview(item)) {
-      await fillNonImage(preview, item, url);
     } else {
-      preview.innerHTML = '<span class="thumb-icon" style="font-size:3rem">' + TYPE_ICONS[item.kind] + '</span>';
+      await fillNonImage(preview, item, url);
     }
 
-    body.innerHTML = buildDetailMetaHtml(item);
+    const tags = await tagsForItem(item);
+    body.innerHTML = buildDetailMetaHtml(item) + buildTagEditorHtml(item, tags);
 
     const hasToken = !!token();
     const share = shareUrlOf(item);
@@ -1841,7 +2229,8 @@
     }
     if (item.isPrivate) await ensurePrivateUrl(item);
     if (title) title.textContent = item.name;
-    body.innerHTML = buildDetailMetaHtml(item);
+    const tags = await tagsForItem(item);
+    body.innerHTML = buildDetailMetaHtml(item) + buildTagEditorHtml(item, tags);
     const hasToken = !!token();
     const share = shareUrlOf(item);
     actions.innerHTML =
@@ -2086,12 +2475,18 @@
       return;
     }
     const div = document.createElement('div');
-    div.className = 'lightbox-text';
-    div.style.textAlign = 'center';
-    div.innerHTML = '<div style="font-size:4rem;margin-bottom:16px">' + TYPE_ICONS.other +
-      '</div><div>.' + escapeHtml(item.ext) + ' 文件暂不支持在线预览</div>' +
-      '<div style="margin-top:12px;opacity:.7"><a href="' + escapeAttr(openUrl) +
-      '" target="_blank" rel="noopener" style="color:#93c5fd">下载 / 打开</a></div>';
+    div.className = 'lightbox-text media-fallback-wrap';
+    const extLabel = item.ext ? ('.' + item.ext) : (item.name || '未知');
+    const kindLabel = item.kind === 'other' ? '未知 / 其他格式' : (item.kind || '文件');
+    div.innerHTML =
+      '<div class="media-fallback-icon">' + (TYPE_ICONS[item.kind] || TYPE_ICONS.other) + '</div>' +
+      '<div class="media-fallback-title">' + escapeHtml(item.name) + '</div>' +
+      '<div class="media-fallback-sub">' + escapeHtml(kindLabel) + ' · ' + escapeHtml(extLabel) +
+      ' · 浏览器无法内嵌预览</div>' +
+      '<div class="media-fallback-actions">' +
+      '<a class="primary" href="' + escapeAttr(openUrl) + '" target="_blank" rel="noopener">新窗口打开</a>' +
+      '<a href="' + escapeAttr(openUrl) + '" download="' + escapeAttr(item.name) + '">下载</a>' +
+      '</div>';
     container.appendChild(div);
   }
 
@@ -2423,6 +2818,8 @@
       setStatus('已复制文件名', 'ok');
     } else if (action === 'preview') {
       openLightbox(item, false);
+    } else if (action === 'detail') {
+      void openDetail(item);
     } else if (action === 'fullscreen') {
       openLightboxFullscreen(item);
     } else if (action === 'delete') {
@@ -2492,6 +2889,10 @@
       rebuildDupIndex();
       updateCategoryCounts();
       selected.clear();
+      if (token()) {
+        try { await loadTagsEnvelope(); } catch (_) { /* ignore */ }
+        await ensureTagIds(ITEMS);
+      }
       await filter();
       if (!silent) setStatus('已同步 ' + ITEMS.length + ' 个文件', 'ok');
       else if (prev !== ITEMS.length) setStatus('已自动同步 ' + ITEMS.length + ' 个文件', 'ok');
@@ -2534,6 +2935,11 @@
     selected.delete(oldRel);
     if (detailItem && detailItem.newRel === oldRel) detailItem = ITEMS[idx];
     rebuildDupIndex();
+    try {
+      if (tagsUnlocked) await migrateItemTags(oldRel, newRel);
+      tagIdCache.delete(oldRel);
+      await ensureTagIds([ITEMS[idx]].filter(Boolean));
+    } catch (_) { /* tag migrate best-effort */ }
   }
 
   async function replaceFile(rel, file) {
@@ -2807,6 +3213,26 @@
       handleAction(btn.dataset.action, detailItem.newRel);
     });
 
+    const detailBody = document.getElementById('detailBody');
+    if (detailBody) {
+      detailBody.addEventListener('click', e => {
+        if (!detailItem) return;
+        void handleTagEditorEvent(e, detailItem);
+      });
+      detailBody.addEventListener('keydown', e => {
+        if (!detailItem) return;
+        void handleTagEditorEvent(e, detailItem);
+      });
+    }
+
+    const tagsUnlockBtn = document.getElementById('tagsUnlockBtn');
+    if (tagsUnlockBtn) {
+      tagsUnlockBtn.onclick = () => {
+        if (tagsUnlocked) lockTags();
+        else void promptUnlockTags();
+      };
+    }
+
     document.getElementById('lightbox').onclick = e => {
       // Close on backdrop / toolbar empty area; keep media, actions & info panel interactive.
       if (e.target.closest('.lb-zoom img, .lb-zoom video, img, video, audio, iframe, .lightbox-text, .media-audio-wrap')) return;
@@ -2838,6 +3264,21 @@
         const item = currentLightboxItem();
         if (!item) return;
         handleAction(btn.dataset.lbInfoAction, item.newRel);
+      });
+    }
+    const lbInfoBody = document.getElementById('lightboxInfoBody');
+    if (lbInfoBody) {
+      lbInfoBody.addEventListener('click', e => {
+        e.stopPropagation();
+        const item = currentLightboxItem();
+        if (!item) return;
+        void handleTagEditorEvent(e, item);
+      });
+      lbInfoBody.addEventListener('keydown', e => {
+        e.stopPropagation();
+        const item = currentLightboxItem();
+        if (!item) return;
+        void handleTagEditorEvent(e, item);
       });
     }
     const lbInfoPanel = document.getElementById('lightboxInfo');
