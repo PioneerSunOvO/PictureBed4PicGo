@@ -51,7 +51,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'privlink';
+  const ASSET_VERSION = 'lbinfo';
   const PUBLIC_PREFIX = 'images/';
   const PRIVATE_PREFIX = 'private/';
   const ACTIONS_SIMILAR_URL =
@@ -116,6 +116,7 @@
   /** Lightbox / compare state */
   let lbMode = 'single'; // single | compare
   let lbFullscreen = false;
+  let lbInfoOpen = false;
   let lbCompareLeft = null;
   let lbCompareRight = null;
   let lbComparePool = [];
@@ -1719,6 +1720,68 @@
     document.getElementById('appShell').classList.remove('detail-open');
   }
 
+  function currentLightboxItem() {
+    if (lbMode === 'compare') return lbCompareLeft;
+    return filtered[lightboxIdx] || null;
+  }
+
+  function closeLbInfo() {
+    lbInfoOpen = false;
+    const panel = document.getElementById('lightboxInfo');
+    const lb = document.getElementById('lightbox');
+    if (panel) panel.hidden = true;
+    if (lb) lb.classList.remove('info-open');
+  }
+
+  async function renderLbInfo(item) {
+    const body = document.getElementById('lightboxInfoBody');
+    const actions = document.getElementById('lightboxInfoActions');
+    const title = document.getElementById('lightboxInfoTitle');
+    if (!body || !actions) return;
+    if (!item) {
+      if (title) title.textContent = '详情';
+      body.innerHTML = '<div class="lb-info-empty">暂无选中文件</div>';
+      actions.innerHTML = '';
+      return;
+    }
+    if (item.isPrivate) await ensurePrivateUrl(item);
+    if (title) title.textContent = item.name;
+    body.innerHTML = buildDetailMetaHtml(item);
+    const hasToken = !!token();
+    const share = shareUrlOf(item);
+    actions.innerHTML =
+      '<button type="button" class="primary" data-lb-info-action="copy-url">' +
+      (item.isPrivate ? '复制私链' : '复制链接') + '</button>' +
+      '<button type="button" data-lb-info-action="copy-name">复制文件名</button>' +
+      '<a href="' + escapeAttr(share) + '" target="_blank" rel="noopener">新窗口</a>' +
+      (hasToken
+        ? '<button type="button" data-lb-info-action="rename">重命名</button>' +
+          '<button type="button" data-lb-info-action="replace">替换</button>' +
+          '<button type="button" class="danger" data-lb-info-action="delete">删除</button>'
+        : '');
+  }
+
+  async function openLbInfo(item) {
+    const target = item || currentLightboxItem();
+    if (!target) return;
+    lbInfoOpen = true;
+    const panel = document.getElementById('lightboxInfo');
+    const lb = document.getElementById('lightbox');
+    if (panel) panel.hidden = false;
+    if (lb) lb.classList.add('info-open');
+    await renderLbInfo(target);
+  }
+
+  async function toggleLbInfo() {
+    if (lbInfoOpen) closeLbInfo();
+    else await openLbInfo();
+  }
+
+  async function syncLbInfoIfOpen() {
+    if (!lbInfoOpen) return;
+    await renderLbInfo(currentLightboxItem());
+  }
+
   function destroyLbZoom() {
     lbZoomControllers.forEach(c => c.destroy && c.destroy());
     lbZoomControllers = [];
@@ -1993,6 +2056,7 @@
 
     if (lbMode === 'single' && active && (active.kind === 'image' || active.kind === 'video')) {
       addBtn('全屏', 'primary', () => {
+        closeLbInfo();
         lbFullscreen = true;
         renderLightboxStage();
       });
@@ -2019,9 +2083,8 @@
         if (!openUrl) { setStatus('链接未就绪', 'err'); return; }
         window.open(openUrl, '_blank', 'noopener');
       });
-      addBtn('详情', '', () => {
-        closeLightbox();
-        void openDetail(active);
+      addBtn(lbInfoOpen ? '收起详情' : '详情', lbInfoOpen ? 'primary' : '', () => {
+        void toggleLbInfo().then(() => renderLbToolbar());
       });
       if (hasToken && lbMode === 'single') {
         addBtn('重命名', '', () => {
@@ -2122,9 +2185,11 @@
       view.appendChild(buildLbPane(item, null));
     }
     renderLbToolbar();
+    void syncLbInfoIfOpen();
   }
 
   function openLightbox(item, fullscreen) {
+    closeDetail();
     lbMode = 'single';
     lbFullscreen = !!fullscreen;
     lbCompareLeft = null;
@@ -2145,6 +2210,7 @@
 
   function openCompare(left, right, pool) {
     if (!left || !right) return;
+    closeDetail();
     lbMode = 'compare';
     lbFullscreen = false;
     lbCompareLeft = left;
@@ -2176,10 +2242,12 @@
 
   function closeLightbox() {
     destroyLbZoom();
+    closeLbInfo();
     const lb = document.getElementById('lightbox');
     lb.classList.remove('open');
     lb.classList.remove('compare-mode');
     lb.classList.remove('fullscreen-mode');
+    lb.classList.remove('info-open');
     const exitBtn = document.getElementById('lightboxExit');
     if (exitBtn) exitBtn.hidden = true;
     const view = document.getElementById('lightboxView');
@@ -2450,7 +2518,10 @@
       void filter();
       if (detailItem) void openDetail(detailItem);
       const lb = document.getElementById('lightbox');
-      if (lb && lb.classList.contains('open')) renderLbToolbar();
+      if (lb && lb.classList.contains('open')) {
+        renderLbToolbar();
+        void syncLbInfoIfOpen();
+      }
     };
     document.getElementById('sort').onchange = e => { sortBy = e.target.value; void filter(); };
 
@@ -2599,9 +2670,9 @@
     });
 
     document.getElementById('lightbox').onclick = e => {
-      // Close on backdrop / toolbar empty area; keep media & action buttons interactive.
+      // Close on backdrop / toolbar empty area; keep media, actions & info panel interactive.
       if (e.target.closest('.lb-zoom img, .lb-zoom video, img, video, audio, iframe, .lightbox-text')) return;
-      if (e.target.closest('button, a, input, .lightbox-actions, .lb-thumbs, .lb-pane-label')) return;
+      if (e.target.closest('button, a, input, .lightbox-actions, .lightbox-info, .lb-thumbs, .lb-pane-label')) return;
       closeLightbox();
     };
     document.getElementById('lightboxExit').onclick = e => {
@@ -2612,10 +2683,42 @@
     document.getElementById('lightboxNext').onclick = e => { e.stopPropagation(); lightboxNav(1); };
     document.getElementById('lightboxActions').addEventListener('click', e => e.stopPropagation());
 
+    const lbInfoClose = document.getElementById('lightboxInfoClose');
+    if (lbInfoClose) {
+      lbInfoClose.onclick = e => {
+        e.stopPropagation();
+        closeLbInfo();
+        renderLbToolbar();
+      };
+    }
+    const lbInfoActions = document.getElementById('lightboxInfoActions');
+    if (lbInfoActions) {
+      lbInfoActions.addEventListener('click', e => {
+        e.stopPropagation();
+        const btn = e.target.closest('[data-lb-info-action]');
+        if (!btn) return;
+        const item = currentLightboxItem();
+        if (!item) return;
+        handleAction(btn.dataset.lbInfoAction, item.newRel);
+      });
+    }
+    const lbInfoPanel = document.getElementById('lightboxInfo');
+    if (lbInfoPanel) {
+      lbInfoPanel.addEventListener('click', e => e.stopPropagation());
+    }
+
     document.addEventListener('keydown', e => {
       const lb = document.getElementById('lightbox');
       if (!lb.classList.contains('open')) return;
-      if (e.key === 'Escape') closeLightbox();
+      if (e.key === 'Escape') {
+        if (lbInfoOpen) {
+          closeLbInfo();
+          renderLbToolbar();
+        } else {
+          closeLightbox();
+        }
+        return;
+      }
       if (lbMode === 'compare') return;
       if (e.key === 'ArrowLeft') lightboxNav(-1);
       if (e.key === 'ArrowRight') lightboxNav(1);

@@ -900,9 +900,18 @@
       gap: 12px;
     }
     .lightbox.open { display: flex; }
+    .lightbox-main {
+      position: relative;
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+    }
     .lightbox-stage {
       position: relative;
       flex: 1 1 auto;
+      min-width: 0;
       min-height: 0;
       display: flex;
       align-items: center;
@@ -1092,6 +1101,122 @@
     }
     .lightbox-actions button.primary:hover { background: rgba(79,110,247,1); }
 
+    .lightbox-info {
+      flex: 0 0 min(360px, 42vw);
+      width: min(360px, 42vw);
+      max-width: 100%;
+      display: flex;
+      flex-direction: column;
+      background: rgba(15, 23, 42, 0.92);
+      border-left: 1px solid rgba(255,255,255,.12);
+      color: #e5e7eb;
+      backdrop-filter: blur(14px);
+      min-height: 0;
+      animation: lbInfoIn .2s ease;
+    }
+    .lightbox-info[hidden] { display: none !important; }
+    @keyframes lbInfoIn {
+      from { opacity: 0; transform: translateX(12px); }
+      to { opacity: 1; transform: none; }
+    }
+    .lightbox-info-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid rgba(255,255,255,.1);
+    }
+    .lightbox-info-head h2 {
+      margin: 0;
+      font-size: 0.92rem;
+      font-weight: 600;
+      color: #f8fafc;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .lightbox-info-close {
+      border: none;
+      background: transparent;
+      color: rgba(255,255,255,.7);
+      font-size: 1.25rem;
+      line-height: 1;
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 8px;
+    }
+    .lightbox-info-close:hover {
+      background: rgba(255,255,255,.12);
+      color: #fff;
+    }
+    .lightbox-info-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 16px 8px;
+    }
+    .lightbox-info .detail-section h3 {
+      color: rgba(148, 163, 184, 0.95);
+    }
+    .lightbox-info .meta-label { color: #f1f5f9; }
+    .lightbox-info .meta-desc { color: rgba(148, 163, 184, 0.9); }
+    .lightbox-info .meta-value { color: #cbd5e1; }
+    .lightbox-info .detail-section + .detail-section {
+      border-top-color: rgba(255,255,255,.1);
+    }
+    .lb-info-empty {
+      color: rgba(148, 163, 184, 0.9);
+      font-size: 0.85rem;
+      padding: 20px 0;
+      text-align: center;
+    }
+    .lightbox-info-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 12px 16px;
+      border-top: 1px solid rgba(255,255,255,.1);
+    }
+    .lightbox-info-actions button,
+    .lightbox-info-actions a {
+      font-size: 0.78rem;
+      padding: 7px 11px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,.18);
+      background: rgba(255,255,255,.1);
+      color: #fff;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .lightbox-info-actions button:hover,
+    .lightbox-info-actions a:hover {
+      background: rgba(255,255,255,.2);
+    }
+    .lightbox-info-actions button.primary {
+      background: rgba(79,110,247,.85);
+      border-color: transparent;
+    }
+    .lightbox-info-actions button.danger {
+      border-color: rgba(248,113,113,.45);
+      background: rgba(220,38,38,.28);
+    }
+    .lightbox.info-open .lightbox-view:not(.compare) .lb-zoom img,
+    .lightbox.info-open .lightbox-view:not(.compare) .lb-zoom video {
+      max-height: calc(100vh - 140px);
+    }
+    @media (max-width: 900px) {
+      .lightbox.info-open .lightbox-main {
+        flex-direction: column;
+      }
+      .lightbox-info {
+        flex: 0 0 auto;
+        width: 100%;
+        max-height: 42vh;
+        border-left: none;
+        border-top: 1px solid rgba(255,255,255,.12);
+      }
+    }
+
     .lightbox.fullscreen-mode {
       padding: 0;
       gap: 0;
@@ -1100,9 +1225,13 @@
     }
     .lightbox.fullscreen-mode .lightbox-stage {
       flex: 1 1 auto;
-      height: 100vh;
-      max-height: 100vh;
+      height: 100%;
+      max-height: none;
     }
+    .lightbox.fullscreen-mode .lightbox-main {
+      height: 100vh;
+    }
+    .lightbox.fullscreen-mode .lightbox-info { display: none !important; }
     .lightbox.fullscreen-mode .lightbox-view {
       max-height: 100vh;
       height: 100%;
@@ -1478,10 +1607,20 @@
 
   <div class="lightbox" id="lightbox">
     <button type="button" class="lightbox-exit" id="lightboxExit" hidden aria-label="退出全屏">&times;</button>
-    <div class="lightbox-stage">
-      <button type="button" class="lightbox-nav prev" id="lightboxPrev" aria-label="上一张">‹</button>
-      <div class="lightbox-view" id="lightboxView"></div>
-      <button type="button" class="lightbox-nav next" id="lightboxNext" aria-label="下一张">›</button>
+    <div class="lightbox-main">
+      <div class="lightbox-stage">
+        <button type="button" class="lightbox-nav prev" id="lightboxPrev" aria-label="上一张">‹</button>
+        <div class="lightbox-view" id="lightboxView"></div>
+        <button type="button" class="lightbox-nav next" id="lightboxNext" aria-label="下一张">›</button>
+      </div>
+      <aside class="lightbox-info" id="lightboxInfo" hidden>
+        <div class="lightbox-info-head">
+          <h2 id="lightboxInfoTitle">详情</h2>
+          <button type="button" class="lightbox-info-close" id="lightboxInfoClose" aria-label="收起详情">&times;</button>
+        </div>
+        <div class="lightbox-info-body" id="lightboxInfoBody"></div>
+        <div class="lightbox-info-actions" id="lightboxInfoActions"></div>
+      </aside>
     </div>
     <div class="lightbox-toolbar">
       <div class="lightbox-caption" id="lightboxCaption"></div>
@@ -1508,7 +1647,7 @@
       allowedLogins: []
     };
   </script>
-  <script src="gallery-app.js?v=privlink"></script>
+  <script src="gallery-app.js?v=lbinfo"></script>
   <script>
     GalleryApp.init({ items: [], oldMap: {} });
   </script>
