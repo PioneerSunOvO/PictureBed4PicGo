@@ -78,7 +78,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'utf8fix';
+  const ASSET_VERSION = 'typefix';
   /** 公开图床根路径（PicGo 默认）；Markdown 外链指向此目录 */
   const PUBLIC_PREFIX = 'images/';
   /** 私有目录；列表需登录，预览走 blob 或可选 Worker 代理 */
@@ -475,17 +475,100 @@
   let lbZoomControllers = [];
 
   function extOf(name) {
-    const i = name.lastIndexOf('.');
-    return i >= 0 ? name.slice(i + 1).toLowerCase() : '';
+    const i = String(name || '').lastIndexOf('.');
+    if (i < 0 || i === String(name).length - 1) return '';
+    const ext = String(name).slice(i + 1).toLowerCase();
+    // 排除 "SpringCloud组件.PNG" 以外的异常：路径段不应含 /
+    if (ext.includes('/') || ext.length > 12) return '';
+    return ext;
+  }
+
+  /** 无扩展名时从旧路径 / 魔数结果推断扩展名 */
+  function resolveExt(name, oldRel, sniffedExt) {
+    const cur = extOf(name);
+    if (cur) return cur;
+    if (sniffedExt) return sniffedExt;
+    if (oldRel) {
+      const fromOld = extOf(oldRel.includes('/') ? oldRel.split('/').pop() : oldRel);
+      if (fromOld) return fromOld;
+    }
+    return '';
+  }
+
+  /** 根据扩展名返回 image | video | audio | document | text | other */
+  function fileKindFromExt(ext) {
+    const e = String(ext || '').toLowerCase();
+    if (!e) return 'other';
+    for (const [kind, exts] of Object.entries(EXT_MAP)) {
+      if (exts.includes(e)) return kind;
+    }
+    return 'other';
   }
 
   /** 根据扩展名返回 image | video | audio | document | pdf | text | other */
   function fileKind(name) {
-    const ext = extOf(name);
-    for (const [kind, exts] of Object.entries(EXT_MAP)) {
-      if (exts.includes(ext)) return kind;
+    return fileKindFromExt(extOf(name));
+  }
+
+  /** 文件头魔数 → 扩展名（无后缀文件仍可识别类型） */
+  function sniffExtFromBytes(bytes) {
+    if (!bytes || bytes.length < 4) return '';
+    const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const ascii = (start, n) => String.fromCharCode.apply(null, b.subarray(start, start + n));
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'png';
+    if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpg';
+    if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'gif';
+    if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b.length >= 12 && ascii(8, 4) === 'WEBP') return 'webp';
+    if (b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46) return 'pdf';
+    if (b.length >= 12 && ascii(4, 4) === 'ftyp') return 'mp4';
+    if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return 'webm';
+    if (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) return 'mp3';
+    if (b[0] === 0xff && (b[1] & 0xe0) === 0xe0) return 'mp3';
+    if (b.length >= 12 && ascii(0, 4) === 'RIFF' && ascii(8, 4) === 'WAVE') return 'wav';
+    if (b[0] === 0x4f && b[1] === 0x67 && b[2] === 0x67 && b[3] === 0x53) return 'ogg';
+    if (ascii(0, 5) === '%PDF-') return 'pdf';
+    if (b[0] === 0x3c && (ascii(0, 5).toLowerCase().includes('svg') || ascii(0, 8).includes('?xml'))) {
+      const head = ascii(0, Math.min(256, b.length)).toLowerCase();
+      if (head.includes('<svg') || head.includes('svg xmlns')) return 'svg';
     }
-    return 'other';
+    return '';
+  }
+
+  async function sniffExtForItem(item) {
+    if (!item || extOf(item.name)) return '';
+    try {
+      let url = '';
+      const headers = { Range: 'bytes=0-63' };
+      if (item.isPrivate && token()) {
+        const meta = await getFileMeta(item.newRel);
+        if (meta && meta.content) {
+          const bin = bytesFromB64(meta.content);
+          return sniffExtFromBytes(bin.subarray(0, 64));
+        }
+      } else {
+        url = item.raw || shareUrlOf(item);
+        if (!url) return '';
+        const res = await fetch(url, { headers, cache: 'no-store' });
+        if (!res.ok && res.status !== 206) return '';
+        const buf = new Uint8Array(await res.arrayBuffer());
+        return sniffExtFromBytes(buf);
+      }
+    } catch (_) { /* ignore */ }
+    return '';
+  }
+
+  /** 对无扩展名文件补全 ext/kind（旧名推断 → 内容魔数） */
+  async function enrichMissingKinds(items) {
+    const list = (items || []).filter(i => i && !extOf(i.name));
+    if (!list.length) return;
+    for (const item of list) {
+      let ext = resolveExt(item.name, item.oldRel, '');
+      if (!ext) ext = await sniffExtForItem(item);
+      if (!ext) continue;
+      item.ext = ext;
+      item.kind = fileKindFromExt(ext);
+      item.extInferred = true;
+    }
   }
 
   /** 是否允许进入灯箱：当前所有类型均可打开，不支持的走友好降级 UI */
@@ -2186,8 +2269,9 @@
     const name = fullPath.slice(prefix.length);
     const enc = encodePath(fullPath);
     const hash = extractHash(name);
-    const kind = fileKind(name);
     const mappedOld = oldRel || OLD_MAP[fullPath] || '';
+    const ext = resolveExt(name, mappedOld, '');
+    const kind = fileKindFromExt(ext);
     const resolved = resolveItemDate(name, fullPath, mappedOld);
     const date = resolved ? resolved.date : null;
     const pin = repoHeadCommit || REPO.branch;
@@ -2198,7 +2282,8 @@
       isPrivate,
       hash,
       kind,
-      ext: extOf(name),
+      ext,
+      extInferred: !extOf(name) && !!ext,
       date,
       dateStr: formatDate(date),
       dateSource: resolved ? resolved.source : '',
@@ -3001,9 +3086,11 @@
       metaRowHtml('展示别名', alias || '—', '仅用于界面展示，不修改仓库中的文件名'),
       metaRowHtml('文件名', item.name, '仓库中的实际文件名'),
       metaRowHtml(
-        '类型',
-        kindLabel(item.kind) + (item.ext ? ' · .' + item.ext : ''),
-        '按扩展名识别的媒体类别'
+        '识别类型',
+        kindLabel(item.kind) + (item.ext ? ' · .' + item.ext : '') + (item.extInferred ? '（推断）' : ''),
+        item.extInferred
+          ? '文件名无扩展名时，由旧名或文件头魔数推断'
+          : '按扩展名识别的媒体类别'
       ),
       metaRowHtml(
         '可见性',
@@ -3842,11 +3929,12 @@
       setStatus('重命名中…');
       const wasOpen = document.getElementById('lightbox')?.classList.contains('open');
       renameFile(rel, newName)
-        .then(() => {
+        .then((result) => {
           void filter();
-          setStatus('重命名成功', 'ok');
+          if (!(result && result.keptExt)) setStatus('重命名成功', 'ok');
           if (wasOpen) {
-            const next = itemByRel(prefix + newName.replace(/^(images|private)\//, ''));
+            const nextRel = result && result.newRel ? result.newRel : (prefix + newName.replace(/^(images|private)\//, ''));
+            const next = itemByRel(nextRel);
             if (next) openLightbox(next, lbFullscreen);
             else closeLightbox();
           }
@@ -3887,9 +3975,15 @@
         if (old && old.phash && old.blobSha === p.sha) {
           item.phash = old.phash;
         }
+        if (old && old.blobSha === p.sha && old.ext && !extOf(item.name)) {
+          item.ext = old.ext;
+          item.kind = old.kind || fileKindFromExt(old.ext);
+          item.extInferred = true;
+        }
         return item;
       });
       await enrichDatesFromGit(ITEMS);
+      await enrichMissingKinds(ITEMS.filter(i => !extOf(i.name) && i.kind === 'other'));
       similarLoaded = false;
       similarSets = [];
       suspectSets = [];
@@ -3926,8 +4020,10 @@
     if (!newName || newName.includes('/')) throw new Error('新文件名无效');
     const oldBase = oldRel.slice(prefix.length);
     const oldExt = extOf(oldBase);
+    let keptExt = false;
     if (oldExt && !extOf(newName)) {
       newName = newName + '.' + oldExt;
+      keptExt = true;
     }
     const newRel = prefix + newName;
     if (newRel === oldRel) return;
@@ -3950,6 +4046,11 @@
         ITEMS[idx].dateStr = prev.dateStr;
         ITEMS[idx].dateSource = (prev.dateSource || '文件名') + ' · 重命名继承';
       }
+      if (prev && prev.ext && !extOf(ITEMS[idx].name)) {
+        ITEMS[idx].ext = prev.ext;
+        ITEMS[idx].kind = fileKindFromExt(prev.ext);
+        ITEMS[idx].extInferred = true;
+      }
     }
     migrateSelectionRel(oldRel, newRel);
     if (detailItem && detailItem.newRel === oldRel) detailItem = ITEMS[idx];
@@ -3962,6 +4063,10 @@
       await ensureTagIds([ITEMS[idx]].filter(Boolean));
       await ensureAliasIds([ITEMS[idx]].filter(Boolean));
     } catch (_) { /* meta migrate best-effort */ }
+    if (keptExt) {
+      setStatus('重命名成功 · 已自动保留扩展名 .' + oldExt, 'ok');
+    }
+    return { newRel, keptExt, oldExt };
   }
 
   async function replaceFile(rel, file) {
