@@ -31,6 +31,8 @@
   const RENAME_LINKS = new Map();
   let filtered = [];
   const selected = new Set();
+  /** Per-menu selection memory: category -> rel[] */
+  const selectionByCat = new Map();
   let focused = null;
   let detailItem = null;
   let lightboxIdx = -1;
@@ -51,7 +53,7 @@
   let similarMode = 'all';
   const collapsedGroups = new Set();
   let suspectExpanded = false;
-  const ASSET_VERSION = 'tagux';
+  const ASSET_VERSION = 'selscope';
   const PUBLIC_PREFIX = 'images/';
   const PRIVATE_PREFIX = 'private/';
   const TAGS_META_PATH = 'meta/asset-tags.enc.json';
@@ -197,8 +199,14 @@
     const parsed = parseAppHash();
     routeQuiet = true;
     try {
-      if (parsed.category && parsed.category !== category) autoSmartSelected = false;
-      if (parsed.category) category = parsed.category;
+      if (parsed.category && parsed.category !== category) {
+        snapshotSelectionForCategory(category);
+        autoSmartSelected = false;
+        category = parsed.category;
+        restoreSelectionForCategory(category);
+      } else if (parsed.category) {
+        category = parsed.category;
+      }
       setNavActive(category);
 
       const qEl = document.getElementById('q');
@@ -247,10 +255,57 @@
     syncAppRoute('replace');
   }
 
+  function snapshotSelectionForCategory(cat) {
+    if (!cat) return;
+    selectionByCat.set(cat, [...selected]);
+  }
+
+  function restoreSelectionForCategory(cat) {
+    selected.clear();
+    const saved = selectionByCat.get(cat);
+    if (!saved || !saved.length) return;
+    const valid = new Set(ITEMS.map(i => i.newRel));
+    saved.forEach(rel => {
+      if (valid.has(rel)) selected.add(rel);
+    });
+  }
+
+  function clearAllSelections() {
+    selected.clear();
+    selectionByCat.clear();
+  }
+
+  function pruneSelectionMemory(rel) {
+    if (!rel) return;
+    selected.delete(rel);
+    selectionByCat.forEach((list, cat) => {
+      const next = list.filter(r => r !== rel);
+      if (next.length) selectionByCat.set(cat, next);
+      else selectionByCat.delete(cat);
+    });
+  }
+
+  function migrateSelectionRel(oldRel, newRel) {
+    if (!oldRel || !newRel || oldRel === newRel) return;
+    if (selected.has(oldRel)) {
+      selected.delete(oldRel);
+      selected.add(newRel);
+    }
+    selectionByCat.forEach((list, cat) => {
+      selectionByCat.set(cat, list.map(r => (r === oldRel ? newRel : r)));
+    });
+  }
+
   function switchCategory(next, routeMode) {
     if (!next || !ROUTE_CATS.has(next)) return;
-    if (next !== category) autoSmartSelected = false;
+    if (next === category) {
+      void filter().then(() => syncAppRoute(routeMode || 'replace'));
+      return;
+    }
+    snapshotSelectionForCategory(category);
+    autoSmartSelected = false;
     category = next;
+    restoreSelectionForCategory(category);
     setNavActive(category);
     routeQuiet = true;
     try {
@@ -1189,7 +1244,7 @@
     sessionStorage.removeItem(OAUTH_STATE_KEY);
     sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
     clearPrivateUrlCache();
-    selected.clear();
+    clearAllSelections();
     detailItem = null;
     ITEMS = [];
     similarLoaded = false;
@@ -1820,6 +1875,7 @@
   }
 
   function updateSelUI() {
+    selectionByCat.set(category, [...selected]);
     const n = selected.size;
     const el = document.getElementById('selCount');
     if (el) el.textContent = String(n);
@@ -3125,7 +3181,7 @@
       autoSmartSelected = false;
       rebuildDupIndex();
       updateCategoryCounts();
-      selected.clear();
+      clearAllSelections();
       if (token()) {
         try { await loadTagsEnvelope(); } catch (_) { /* ignore */ }
         await ensureTagIds(ITEMS);
@@ -3169,7 +3225,7 @@
         ITEMS[idx].dateSource = (prev.dateSource || '文件名') + ' · 重命名继承';
       }
     }
-    selected.delete(oldRel);
+    migrateSelectionRel(oldRel, newRel);
     if (detailItem && detailItem.newRel === oldRel) detailItem = ITEMS[idx];
     rebuildDupIndex();
     try {
@@ -3219,7 +3275,7 @@
     }
     if (lastErr) throw lastErr;
     ITEMS = ITEMS.filter(x => x.newRel !== rel);
-    selected.delete(rel);
+    pruneSelectionMemory(rel);
     if (detailItem && detailItem.newRel === rel) closeDetail();
     rebuildDupIndex();
     void filter();
@@ -3244,7 +3300,7 @@
         const meta = await getFileMeta(rel);
         await deleteFile(rel, meta.sha);
         ITEMS = ITEMS.filter(x => x.newRel !== rel);
-        selected.delete(rel);
+        pruneSelectionMemory(rel);
         ok++;
         setStatus('删除中 ' + ok + '/' + rels.length + '…');
       } catch (e) {
